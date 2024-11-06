@@ -1,0 +1,25 @@
+[package]
+name = "nes_rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.5"
+winit = "0.30"
+egui = "0.29"
+egui-winit = "0.29"
+egui-wgpu = "0.29"
+pollster = "0.3"
+wgpu = "22.1"
+bitflags = "2.6.0"
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false
