@@ -705,8 +705,6 @@ impl Cpu {
             // BRK - Force Inturrupt
             (InsOp::BRK, PS::Exec0) => {
                 self.pc += 1;
-                self.set_flag(Flags6502::I, true);
-                self.set_flag(Flags6502::B, true);
                 let pc_hi_bits = hi_byte(self.pc);
                 self.write(0x0100 + (self.stkpt as u16), pc_hi_bits);
                 self.stkpt = self.stkpt.wrapping_sub(1);
@@ -720,8 +718,8 @@ impl Cpu {
                 false
             },
             (InsOp::BRK, PS::Exec2) => {
-                let p_s = self.status.bits();
-                self.write(0x0100 + self.stkpt as u16, p_s);
+                let p_s = (self.status| Flags6502::B).bits();
+                self.write(0x0100 + self.stkpt as u16, p_s );
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
@@ -735,7 +733,7 @@ impl Cpu {
                 // write pc high
                 let b = self.read_byte(0xFFFF);
                 set_hi_byte(&mut self.pc, b);
-                self.set_flag(Flags6502::B, false);
+                self.set_flag(Flags6502::I, true);
                 false
             },
             (InsOp::BRK, PS::Exec5) => {
@@ -895,7 +893,7 @@ impl Cpu {
                 let temp = self.fetched >> 1;
                 self.check_nz_flags(temp);
 
-                if self.lookup[self.opcode as usize].addrmode() == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::IMP {
                     self.a = temp;
                     true
                 } else {
@@ -923,11 +921,11 @@ impl Cpu {
             // Push Processor Stack
             (InsOp::PHP, PS::Exec0) => {
                 // Idk why these flags are set
-                self.set_flag(Flags6502::B, true);
-                self.set_flag(Flags6502::U, true);
+                // self.set_flag(Flags6502::B, true);
+                // self.set_flag(Flags6502::U, true);
                 self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-                self.set_flag(Flags6502::B, false);
-                self.set_flag(Flags6502::U, false);
+                // self.set_flag(Flags6502::B, false);
+                // self.set_flag(Flags6502::U, false);
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 true
             }
@@ -951,8 +949,7 @@ impl Cpu {
                 let temp = ((self.fetched) << 1) | self.get_flag(Flags6502::C) as u8;
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
                 self.check_nz_flags(temp);
-
-                if self.lookup[self.opcode as usize].addrmode() == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::IMP {
                     self.a = temp;
                     true
                 } else {
@@ -962,15 +959,18 @@ impl Cpu {
             }
             (InsOp::ROL, PS::Exec1) => {
                 self.write(self.addr_data, self.fetched);
+                false
+            }
+            (InsOp::ROL, PS::Exec2) => {
                 true
             }
             // Rotate Right
             (InsOp::ROR, PS::Exec0) => {
-                let temp = self.get_flag(Flags6502::C) as u8 | (self.fetched << 1);
+                let temp = ((self.get_flag(Flags6502::C) as u8) << 7) | self.fetched;
                 self.set_flag(Flags6502::C, self.fetched & 0x01 > 0);
                 self.check_nz_flags(temp);
 
-                if self.lookup[self.opcode as usize].addrmode() == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::IMP {
                     self.a = temp;
                     true
                 } else {
@@ -980,6 +980,9 @@ impl Cpu {
             }
             (InsOp::ROR, PS::Exec1) => {
                 self.write(self.addr_data, self.fetched);
+                false
+            }
+            (InsOp::ROR, PS::Exec2) => {
                 true
             }
             // Return from Inturrupt
@@ -993,7 +996,7 @@ impl Cpu {
                 self.stkpt = self.stkpt.wrapping_add(1);
                 self.status = Flags6502::from_bits_retain(b);
                 self.status &= !Flags6502::B;
-                self.status &= !Flags6502::U;
+                // self.status &= !Flags6502::U;
                 false
             }
             (InsOp::RTI, PS::Exec2) => {
@@ -1005,6 +1008,9 @@ impl Cpu {
             (InsOp::RTI, PS::Exec3) => {
                 let b = self.read_byte(0x0100 + self.stkpt as u16);
                 set_hi_byte(&mut self.pc, b);
+                false
+            }
+            (InsOp::RTI, PS::Exec4) => {
                 true
             }
             // Return from subroutine
@@ -1022,6 +1028,9 @@ impl Cpu {
             (InsOp::RTS, PS::Exec2) => {
                 let b = self.read_byte(0x0100 + self.stkpt as u16);
                 set_hi_byte(&mut self.pc, b);
+                false
+            }
+            (InsOp::RTS, PS::Exec3) => {
                 true
             }
 
@@ -1057,16 +1066,25 @@ impl Cpu {
             // Store Accumulator
             (InsOp::STA, PS::Exec0) => {
                 self.write(self.addr_data, self.a);
+                false
+            }
+            (InsOp::STA, PS::Exec1) => {
                 true
             }
             // Store X register
             (InsOp::STX, PS::Exec0) => {
                 self.write(self.addr_data, self.x);
+                false
+            }
+            (InsOp::STX, PS::Exec1) => {
                 true
             }
             // Store Y register
             (InsOp::STY, PS::Exec0) => {
                 self.write(self.addr_data, self.y);
+                false
+            }
+            (InsOp::STY, PS::Exec1) => {
                 true
             }
             // Transfer Accumulator to X
@@ -1256,7 +1274,6 @@ impl Cpu {
 
     // Flags
     pub fn get_flag(&self, flag: Flags6502) -> bool {
-        // if  (self.status & flag as u8 ) > 0 { 1 } else { 0 }
         self.status.contains(flag)
     }
     pub fn get_status(&self) -> Flags6502 {
