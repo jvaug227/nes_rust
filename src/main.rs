@@ -1,4 +1,5 @@
 use std::{cell::RefCell, error::Error, rc::Rc, sync::Arc};
+use cartidge::CartridgeData;
 use egui::{ Ui, Color32, RichText};
 use wgpu::Backends;
 use winit::{
@@ -10,6 +11,7 @@ use winit::{
 };
 use anyhow::{anyhow, Result};
 pub mod C6502;
+pub mod cartidge;
 
 fn draw_ram(ui: & mut Ui, bus: &C6502::Bus, addr: u16, rows: u32, cols: usize) {
     ui.vertical_centered_justified(|ui| {
@@ -46,6 +48,10 @@ fn draw_cpu(ui: & mut Ui, cpu: &C6502::Cpu) {
         ui.label(RichText::new(&format!("Stack Ptr: ${:#x}", cpu.stkpt)));
         ui.label(RichText::new(&format!("Fetched: ${:#x}", cpu.fetched)));
         ui.label(RichText::new(&format!("Addr_data: ${:#x}", cpu.addr_data)));
+    });
+    ui.horizontal(|ui: &mut Ui| {
+        ui.label(RichText::new(&format!("Opcode: ${:#x}", cpu.opcode)));
+        ui.label(RichText::new(&format!("Pipeline Status: ${:#x?}", cpu.pipeline_status)));
     });
     
 }
@@ -197,7 +203,11 @@ impl App {
 
             draw_ram(ui, &cpu.bus(), 0x0000, 16, 16);
             ui.separator();
-            draw_ram(ui, &cpu.bus(), 0x8000, 16, 16);
+            draw_ram(ui, &cpu.bus(), 0xC000, 16, 16);
+            ui.separator();
+            draw_ram(ui, &cpu.bus(), 0xC500, 16, 16);
+            ui.separator();
+            draw_ram(ui, &cpu.bus(), 0xC700, 16, 16);
         });
 
 
@@ -291,9 +301,9 @@ impl App {
                 match event.key_without_modifiers().as_ref() {
                     Key::Character(s) => {
                         match s {
-                            "r" => { let mut cycles = 0; cpu.reset(&mut cycles); *cpu.cycles_mut() = cycles; },
-                            "i" => { let mut cycles = 0; cpu.irq(&mut cycles); *cpu.cycles_mut() = cycles; },
-                            "n" => { let mut cycles = 0; cpu.nmi(&mut cycles); *cpu.cycles_mut() = cycles; },
+                            "r" => { cpu.reset(); },
+                            "i" => { let mut cycles = 0; cpu.irq(&mut cycles); },
+                            "n" => { let mut cycles = 0; cpu.nmi(&mut cycles); },
                             "p" => if !self.clock_cpu { cpu.clock(); },
                             _ => {}
                         }
@@ -326,53 +336,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
     //let program = include_bytes!("official_only.nes");
-    let program = include_bytes!("official_only.nes");
-    dbg!(program.len());
-    struct Header {
-        name: [u8; 4],
-        prg_rom_chunks: u8,
-        chr_rom_chunks: u8,
-        mapper1: u8,
-        mapper2: u8,
-        prg_ram_size: u8,
-        tv_system1: u8,
-        tv_system2: u8,
-        unused: [u8; 5],
-    }
-    let header = Header { 
-        name: [0; 4],
-        prg_rom_chunks: program[4],
-        chr_rom_chunks: program[5],
-        mapper1: program[6],
-        mapper2: program[7],
-        prg_ram_size: program[8],
-        tv_system1: program[9],
-        tv_system2: program[10],
-        unused: [0; 5]
-    };
+    let program = include_bytes!("nestest.nes");
+    let cartridge_data = CartridgeData::decode(program);
+    println!("Read Catridge: (Maybe Named) {:?}", cartridge_data.title);
+    println!("Program is {} bytes", program.len());
+    println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
+    println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
+    println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
 
-    let program_start: usize = 0x8000;
-    
-    let trainer_data_size = if header.mapper1 & 0x04 > 0 { 512 } else { 0 };
-    let prg_data_size = header.prg_rom_chunks as usize * 16384;
-    let chr_data_size = header.chr_rom_chunks as usize * 8192;
-    let data_start = 16 + trainer_data_size;
-    println!("Program stats: Trainer Data Size: {}, Prg Banks: {}, Prg Data Size: {}, Chr Banks: {}, Chr Data Size: {}", trainer_data_size, header.prg_rom_chunks, prg_data_size, header.chr_rom_chunks, chr_data_size);
-    println!("Program rom start: {}", data_start);
-    let program = &program[0x2210..];
-    for i in 0..program.len() {
-        let value = program[i];
-        cpu.bus_mut().ram[program_start + i] = value;
+    const PROGRAM_RANGE: usize = 32768;
+    let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
+    let mirror_length = cartridge_data.prg_rom_range.len();
+    // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
+    if mirror_count > 1 {
+        let program_range = &program[cartridge_data.prg_rom_range.clone()];
+        println!("Needs to mirror");
+        for i in 0..mirror_count {
+            let mirror_start = 0x8000 + mirror_length*i;
+            let mirror_end = mirror_start + mirror_length;
+            cpu.bus_mut().ram[mirror_start .. mirror_end].copy_from_slice(program_range);   
+        }
+    } else {
+        cpu.bus_mut().ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
     }
-    cpu.bus_mut().ram[0xFFFA] = 0x00;
-    cpu.bus_mut().ram[0xFFFB] = 0x80;
-    cpu.bus_mut().ram[0xFFFC] = 0x00;
-    cpu.bus_mut().ram[0xFFFD] = 0x80;
-    cpu.bus_mut().ram[0xFFFE] = 0x00;
-    cpu.bus_mut().ram[0xFFFF] = 0x80;
-    let mut cycles = 0;
-    cpu.reset(&mut cycles);
-    *cpu.cycles_mut() = cycles;
+
+    // cpu.bus_mut().ram[0xFFFA] = 0x00;
+    // cpu.bus_mut().ram[0xFFFB] = 0x80;
+    // cpu.bus_mut().ram[0xFFFC] = 0x00;
+    // cpu.bus_mut().ram[0xFFFD] = 0x80;
+    // cpu.bus_mut().ram[0xFFFE] = 0x00;
+    // cpu.bus_mut().ram[0xFFFF] = 0x80;
+    cpu.reset();
+    cpu.pc = 0xC000;
+    let a = cpu.bus().ram[0xC000];
+    cpu.opcode = a;
 
     let mut app = App::new(cpu);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

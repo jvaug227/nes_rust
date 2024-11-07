@@ -325,7 +325,7 @@ impl Cpu {
 
     // Perform one instruction worth of emulation
     pub fn clock(&mut self) -> bool {
-        println!("Clock: {:?}", self.pipeline_status);
+        // println!("Clock: {:?}", self.pipeline_status);
         let instruction = self.lookup[self.opcode as usize];
         let instruction_finished = self.execute(instruction.op(), instruction.addrmode());
         if instruction_finished {
@@ -340,102 +340,6 @@ impl Cpu {
     /// Returns false if the cpu should wait for a clock cycle
     fn execute_addrmode(&mut self, addrmode: u8) -> bool {
         use InstructionAddressingModes as Addr;
-        // match addrmode {
-        //     AddrMode::IMP => {}
-        //     AddrMode::ACC => {
-        //         self.fetched = self.a;
-        //     }
-        //     AddrMode::IMM => {
-        //         self.addr_abs = self.pc;
-        //         self.pc += 1;
-        //     }
-        //     AddrMode::ZP => {
-        //         self.addr_abs = (self.read_byte(self.pc, cycles) as u16) & 0x00FF;
-        //         self.pc += 1;
-        //     }
-        //     AddrMode::ZP_X => {
-        //         self.addr_abs =
-        //             (self.read_byte(self.pc, cycles).wrapping_add(self.x) as u16) & 0x00FF;
-        //         cycles.add_assign(1);
-        //         self.pc += 1;
-        //     }
-        //     AddrMode::ZP_Y => {
-        //         self.addr_abs =
-        //             (self.read_byte(self.pc, cycles).wrapping_add(self.y) as u16) & 0x00FF;
-        //         cycles.add_assign(1);
-        //         self.pc += 1;
-        //     }
-        //     AddrMode::REL => {
-        //         self.addr_rel = self.read_byte(self.pc, cycles) as u16;
-        //         self.pc += 1;
-        //
-        //         // TODO: Fix this or verify it
-        //         if self.addr_rel & 0x80 > 0 {
-        //             self.addr_rel |= 0xFF00;
-        //         }
-        //     }
-        //     AddrMode::ABS => {
-        //         self.addr_abs = self.read_word(self.pc, cycles);
-        //         self.pc += 2;
-        //     }
-        //     AddrMode::ABS_X => {
-        //         let abs_address = self.read_word(self.pc, cycles);
-        //         self.pc += 2;
-        //         self.addr_abs = abs_address + self.x as u16;
-        //         let page_boundary_crossed = Self::page_boundary_crossed(abs_address, self.addr_abs);
-        //         cycles.add_assign(page_boundary_crossed as u32);
-        //     }
-        //     AddrMode::ABS_Y => {
-        //         let abs_addr = self.read_word(self.pc, cycles);
-        //         self.pc += 1;
-        //         self.pc += 1;
-        //         self.addr_abs = abs_addr + self.y as u16;
-        //         let page_boundary_crossed = Self::page_boundary_crossed(abs_addr, self.addr_abs);
-        //         cycles.add_assign(page_boundary_crossed as u32);
-        //     }
-        //     AddrMode::IND => {
-        //         let ptr_lo: u16 = self.read_byte(self.pc, cycles) as u16;
-        //         self.pc += 1;
-        //         let ptr_hi: u16 = self.read_byte(self.pc, cycles) as u16;
-        //         self.pc += 1;
-        //
-        //         let ptr: u16 = ptr_lo | (ptr_hi << 8);
-        //
-        //         if ptr_lo == 0x00FF {
-        //             // Simulate page boundary hardware bug
-        //             self.addr_abs = (self.read_byte(ptr & 0x0FF, cycles) as u16) << 8
-        //                 | self.read_byte(ptr, cycles) as u16;
-        //         } else {
-        //             // behave normally
-        //             self.addr_abs = (self.read_byte(ptr + 1, cycles) as u16) << 8
-        //                 | self.read_byte(ptr, cycles) as u16;
-        //         }
-        //     }
-        //     AddrMode::IND_X => {
-        //         let t: u8 = self.read_byte(self.pc, cycles);
-        //         self.pc += 1;
-        //         let tl = t.wrapping_add(self.x);
-        //         let th = tl.wrapping_add(1);
-        //         cycles.add_assign(1);
-        //         let lo: u16 = self.read_byte(tl as u16, cycles) as u16;
-        //         let hi: u16 = self.read_byte(th as u16, cycles) as u16;
-        //
-        //         self.addr_abs = (hi << 8) | lo;
-        //     }
-        //     AddrMode::IND_Y => {
-        //         let t: u16 = self.read_byte(self.pc, cycles) as u16;
-        //         self.pc += 1;
-        //
-        //         let lo: u16 = self.read_byte(t & 0x00FF, cycles) as u16;
-        //         let hi: u16 = self.read_byte((t + 1) & 0x00FF, cycles) as u16;
-        //         let abs_addr = (hi << 8) | lo;
-        //         self.addr_abs = abs_addr + self.y as u16;
-        //
-        //         let page_boundary_crossed = Self::page_boundary_crossed(abs_addr, self.addr_abs);
-        //         cycles.add_assign(page_boundary_crossed as u32);
-        //     }
-        //     _ => {}
-        // }
 
         let opcode = self.lookup[self.opcode as usize].op();
         // Page boundary incurrs a +1 cycle cost
@@ -684,14 +588,7 @@ impl Cpu {
                     true
                 }
             }
-            // TODO: Does this cycle need to be incurred, or can the carry addition be moved to the
-            // previous cycle's addition.
-            // This functions properly for branch instructions, but negative numbers also incurr
-            // this cost.
             (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec2) => {
-                // let new_hi_byte = hi_byte(self.pc).wrapping_add(1);
-                // set_hi_byte(&mut self.pc, new_hi_byte);
-                // self.page_boundary_crossed = false;
                 true
             }
             // Bit Test
@@ -1128,12 +1025,6 @@ impl Cpu {
 
     fn execute(&mut self, instruction: u8, addrmode: u8) -> bool {
 
-        // if !self.lookup[self.opcode as usize].addrmode() == InstructionAddressingModes::IMP {
-        //     // println!("OPCODE: {}, IMPLIED FALSE", self.opcode);
-        //     // dbg!(self.addr_abs);
-        //     self.fetched = self.read_byte(self.addr_abs, cycles);
-        // }
-
         if !matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Store) {
             let finished_addressing = self.execute_addrmode(addrmode);
             if !finished_addressing { if !self.page_boundary_crossed { self.pipeline_status.advance(); } return false; }
@@ -1152,11 +1043,10 @@ impl Cpu {
     // allows the programmer to jump to a known and programmable location in the
     // memory to start executing from. Typically the programmer would set the value
     // at location 0xFFFC at compile time.
-    pub fn reset(&mut self, cycles: &mut u32) {
-        self.addr_abs = 0xFFFC;
-        self.addr_data = 0;
+    pub fn reset(&mut self) {
+        self.addr_data = 0xFFFC;
 
-        self.pc = self.read_word(self.addr_abs);
+        self.pc = self.read_word(self.addr_data);
 
         self.a = 0;
         self.x = 0;
@@ -1164,11 +1054,7 @@ impl Cpu {
         self.stkpt = 0xFD;
         self.status = Flags6502::U;
 
-        self.addr_rel = 0;
-        self.addr_abs = 0;
         self.fetched = 0;
-
-        cycles.add_assign(6);
     }
 
     // Interrupt requests are a complex operation and only happen if the
