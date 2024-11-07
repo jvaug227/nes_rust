@@ -601,7 +601,6 @@ impl Cpu {
             }
             // BRK - Force Inturrupt
             (InsOp::BRK, PS::Exec0) => {
-                self.pc += 1;
                 let pc_hi_bits = hi_byte(self.pc);
                 self.write(0x0100 + (self.stkpt as u16), pc_hi_bits);
                 self.stkpt = self.stkpt.wrapping_sub(1);
@@ -615,9 +614,10 @@ impl Cpu {
                 false
             },
             (InsOp::BRK, PS::Exec2) => {
-                let p_s = (self.status| Flags6502::B).bits();
+                let p_s = (self.status | Flags6502::B | Flags6502::U).bits();
                 self.write(0x0100 + self.stkpt as u16, p_s );
                 self.stkpt = self.stkpt.wrapping_sub(1);
+                self.set_flag(Flags6502::I, true);
                 false
             },
             (InsOp::BRK, PS::Exec3) => {
@@ -630,7 +630,6 @@ impl Cpu {
                 // write pc high
                 let b = self.read_byte(0xFFFF);
                 set_hi_byte(&mut self.pc, b);
-                self.set_flag(Flags6502::I, true);
                 false
             },
             (InsOp::BRK, PS::Exec5) => {
