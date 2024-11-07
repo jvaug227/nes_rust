@@ -890,9 +890,10 @@ impl Cpu {
             },
             (InsOp::RTI,PS::Exec1) => {
                 let b = self.read_byte(0x0100 + self.stkpt as u16);
+                let b = (b & 0b11001111) | (self.status.bits() & 0b00110000);
                 self.stkpt = self.stkpt.wrapping_add(1);
                 self.status = Flags6502::from_bits_retain(b);
-                self.status &= !Flags6502::B;
+                // self.status &= !Flags6502::B;
                 // self.status &= !Flags6502::U;
                 false
             }
@@ -934,7 +935,7 @@ impl Cpu {
             // Subtract with carry
             // TODO: Confirm subtraction works
             (InsOp::SBC, PS::Exec0) => {
-                let value = self.fetched as u16 ^ 0x00FF;
+                let value = (!self.fetched) as u16;
                 let temp = self.a as u16 + value + self.get_flag(Flags6502::C) as u16;
                 self.set_flag(Flags6502::C, temp & 0xFF00 > 0);
                 self.check_nz_flags(temp as u8);
