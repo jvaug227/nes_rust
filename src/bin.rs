@@ -1,6 +1,6 @@
 use std::{cell::RefCell, error::Error, rc::Rc, sync::Arc};
-use cartidge::CartridgeData;
 use egui::{ Ui, Color32, RichText};
+use nes_rust::{cpu::*, cartidge::CartridgeData };
 use wgpu::Backends;
 use winit::{
     application::ApplicationHandler,
@@ -10,10 +10,8 @@ use winit::{
     window::{Window, WindowAttributes}
 };
 use anyhow::{anyhow, Result};
-pub mod C6502;
-pub mod cartidge;
 
-fn draw_ram(ui: & mut Ui, bus: &C6502::Bus, addr: u16, rows: u32, cols: usize) {
+fn draw_ram(ui: & mut Ui, bus: &Bus, addr: u16, rows: u32, cols: usize) {
     ui.vertical_centered_justified(|ui| {
         for row in 0..rows {
             let row_addr = addr as usize + (cols * row as usize);
@@ -27,15 +25,15 @@ fn draw_ram(ui: & mut Ui, bus: &C6502::Bus, addr: u16, rows: u32, cols: usize) {
     
 }
 
-fn draw_cpu_flag(ui: &mut Ui, flag: C6502::Flags6502, cpu: &C6502::Cpu) {
+fn draw_cpu_flag(ui: &mut Ui, flag: Flags6502, cpu: &Cpu) {
     ui.label(RichText::new(flag.to_string()).color(if cpu.get_flag(flag) { Color32::GREEN } else { Color32::RED }));
 }
 
-fn draw_cpu(ui: & mut Ui, cpu: &C6502::Cpu) {
+fn draw_cpu(ui: & mut Ui, cpu: &Cpu) {
     
     ui.label("Status:");
     ui.horizontal(|ui: &mut Ui| {
-        let flags = [C6502::Flags6502::C, C6502::Flags6502::Z, C6502::Flags6502::I, C6502::Flags6502::D, C6502::Flags6502::B, C6502::Flags6502::U, C6502::Flags6502::V, C6502::Flags6502::N];
+        let flags = [Flags6502::C, Flags6502::Z, Flags6502::I, Flags6502::D, Flags6502::B, Flags6502::U, Flags6502::V, Flags6502::N];
         for flag in flags {
             draw_cpu_flag(ui, flag, cpu);
         }
@@ -53,10 +51,6 @@ fn draw_cpu(ui: & mut Ui, cpu: &C6502::Cpu) {
         ui.label(RichText::new(&format!("Opcode: ${:#x}", cpu.opcode)));
         ui.label(RichText::new(&format!("Pipeline Status: ${:#x?}", cpu.pipeline_status)));
     });
-    
-}
-
-fn drawCode (ui: & mut Ui, cpu: &C6502::Cpu) {
     
 }
 
@@ -119,7 +113,7 @@ impl EguiIntegrator {
     pub fn renderer_mut(&mut self) -> &mut egui_wgpu::Renderer { &mut self.renderer }
 }
 struct App {
-    cpu: C6502::Cpu,
+    cpu: Cpu,
     egui: Option<EguiIntegrator>,
     gpu: Option<Gpu>,
     clock_cpu: bool,
@@ -127,7 +121,7 @@ struct App {
 }
 
 impl App {
-    fn new(cpu: C6502::Cpu) -> Self {
+    fn new(cpu: Cpu) -> Self {
         Self {
             cpu, gpu: None, egui: None, clock_cpu: false, last_time: std::time::Instant::now(),
         }
@@ -194,7 +188,7 @@ impl App {
             ui.label("SPACE = Step Instruction    R = RESET    I = IRQ    N = NMI");
             draw_cpu(ui, cpu);
             ui.separator();
-            drawCode(ui, cpu);
+            // draw code here
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             //egui::SidePanel::left("RAM").show(&context, |ui| {
@@ -331,8 +325,8 @@ impl App {
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
 
-    let mut bus: C6502::Bus = C6502::Bus::new();
-    let mut cpu = C6502::Cpu::new(Rc::new(RefCell::new(bus)));
+    let mut bus: Bus = Bus::new();
+    let mut cpu = Cpu::new(Rc::new(RefCell::new(bus)));
 
     //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
     //let program = include_bytes!("official_only.nes");

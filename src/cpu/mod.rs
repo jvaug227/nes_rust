@@ -1,12 +1,12 @@
-mod cpu;
-mod instructions;
-pub use cpu::*;
+pub mod core;
+pub mod instructions;
+pub use core::*;
 
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use super::cpu::*;
+    use super::core::*;
 
     fn create_cpu() -> Cpu {
         let mut bus = Bus::new();
