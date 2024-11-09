@@ -1,8 +1,9 @@
-use bitflags::{bitflags, Flags};
+use bitflags::bitflags;
 use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
-use std::ops::AddAssign;
 use std::rc::Rc;
+
+use crate::cpu::instructions::stringify_ins_from_log;
 
 use super::instructions::{create_lookup_table, Instruction};
 
@@ -198,6 +199,18 @@ pub fn bytecode_to_addrmode(x: u8) -> u8 {
     addrmode
 }
 
+#[derive(Copy, Clone, Default)]
+pub struct CpuLog {
+    pub count_bytes: u8,
+    pub byte0: u8,
+    pub byte1: u8,
+    pub byte2: u8,
+    pub start_address: u16,
+    pub opcode: u8,
+    pub addrmode: u8,
+    pub start_cycle: usize,
+}
+
 pub struct Cpu {
     bus: Rc<RefCell<Bus>>,
 
@@ -215,13 +228,13 @@ pub struct Cpu {
     pub fetched: u8,
 
     pub addr_data: u16,
-    addr_abs: u16,
-    addr_rel: u16,
 
     pub opcode: u8,
-    cycles: u32,
+    cycles: usize,
 
-    lookup: [Instruction; 256],
+    pub cpu_log: CpuLog,
+
+    pub lookup: [Instruction; 256],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,16 +305,15 @@ impl Cpu {
             page_boundary_crossed: false,
             fetched: 0,
             addr_data: 0,
-            addr_abs: 0,
-            addr_rel: 0,
             opcode: 0,
             cycles: 0,
+            cpu_log: CpuLog::default(),
             lookup: create_lookup_table(),
         }
     }
 
-    pub fn cycles_mut(&mut self) -> &mut u32 {
-        &mut self.cycles
+    pub fn cycles(&mut self) -> usize {
+        self.cycles
     }
 
     // Bus
@@ -323,14 +335,67 @@ impl Cpu {
         self.bus.borrow_mut()
     }
 
+    fn log_byte0(&mut self, b: u8) {
+        self.cpu_log.count_bytes = 1;
+        self.cpu_log.byte0 = b;
+    }
+    fn log_byte1(&mut self, b: u8) {
+        self.cpu_log.count_bytes = 2;
+        self.cpu_log.byte1 = b;
+    }
+    fn log_byte2(&mut self, b: u8) {
+        self.cpu_log.count_bytes = 3;
+        self.cpu_log.byte2 = b;
+    }
+
+    fn print_log(&self) {
+        let pc: u16 = self.cpu_log.start_address;
+        let byte0: u8 = self.cpu_log.byte0;
+        let byte1: u8 = self.cpu_log.byte1;
+        let byte2: u8 = self.cpu_log.byte2;
+        let ins_str: String = stringify_ins_from_log(&self.cpu_log);
+        let a: u8 = self.a;
+        let x: u8 = self.x;
+        let y: u8 = self.y;
+        let p: u8 = self.get_status().bits();
+        let sp: u8 = self.stkpt;
+        let cycles: usize = self.cpu_log.start_cycle;
+        let ppucycles = cycles * 3;
+        let ppu: usize = ppucycles / 340;
+        let ppu2: usize = ppucycles % 340;
+        print!("{pc:0>4X}  {byte0:0>2X}");
+        if self.cpu_log.count_bytes >= 2 {
+            print!(" {byte1:0>2X}");
+        } else {
+            print!("   ");
+        }
+        if self.cpu_log.count_bytes >= 3 {
+            print!(" {byte2:0>2X}");
+        } else {
+            print!("   ");
+        }
+        println!(" {ins_str: <32}A:{a:0>2X} X:{x:0>2X} Y:{y:0>2X} P:{p:0>2X} SP:{sp:0>2X} PPU:{ppu: >3},{ppu2: >3} CYC:{cycles}");
+    }
+
     // Perform one instruction worth of emulation
     pub fn clock(&mut self) -> bool {
         // println!("Clock: {:?}", self.pipeline_status);
         let instruction = self.lookup[self.opcode as usize];
         let instruction_finished = self.execute(instruction.op(), instruction.addrmode());
+        self.cycles = self.cycles.wrapping_add(1);
         if instruction_finished {
+            self.print_log();
+
             self.opcode = self.read_byte(self.pc);
+            self.cpu_log.start_address = self.pc;
             self.pc += 1;
+
+            self.log_byte0(self.opcode);
+            
+            let instruction = self.lookup[self.opcode as usize];
+            self.cpu_log.opcode = instruction.op();
+            self.cpu_log.addrmode = instruction.addrmode();
+            self.cpu_log.start_cycle = self.cycles;
         }
         instruction_finished
     }
@@ -353,17 +418,22 @@ impl Cpu {
             return false;
         }
         match self.pipeline_status {
-            PipelineStatus::Addr0 => {
-                self.addr_data = self.read_byte(self.pc) as u16;
-                self.pc += 1;
-                false
+            PipelineStatus::Addr0 => match addrmode {
+                Addr::IMP | Addr::ACC => { self.fetched = self.a; true },
+                _ => {
+                    self.addr_data = self.read_byte(self.pc) as u16;
+                    if !matches!(addrmode, Addr::ACC | Addr::IMP) {
+                        self.log_byte1(self.addr_data as u8);
+                    }
+                    self.pc += 1;
+                    false
+                }
             },
             PipelineStatus::Addr1 => match addrmode {
-                Addr::ACC => { self.fetched = self.a; true },
-                Addr::IMP |Addr::IMM | Addr::REL => { self.fetched = self.addr_data as u8; true }, // Rel offset is stored in both fetched and addr_data
-                Addr::ZP0 => { self.fetched = self.read_byte(self.addr_data); false },
-                Addr::ZPX => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
-                Addr::ZPY => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
+                Addr::IMM | Addr::REL => { self.fetched = self.addr_data as u8; true }, // Rel offset is stored in both fetched and addr_data
+                Addr::ZP0 => {self.fetched = self.read_byte(self.addr_data); false },
+                Addr::ZPX => {self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
+                Addr::ZPY => {self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
                 Addr::ABS | Addr::ABX | Addr::ABY | Addr::IND => {
                     let offset = match addrmode {
                         Addr::ABX => { self.x },
@@ -380,6 +450,7 @@ impl Cpu {
 
                     let b = self.read_byte(self.pc);
                     self.pc += 1;
+                    self.log_byte2(b);
                     set_hi_byte(&mut self.addr_data, b);
                     false
                 },
@@ -439,7 +510,7 @@ impl Cpu {
                 Addr::ZPX | Addr::ZPY | Addr::ABS | Addr::ABY => { true },
                 Addr::ABX => {
                     use InstructionOperations as InsOp;
-                    !matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL) 
+                    !matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL)
                 } // if this is DEC, this cycle is dedicated to fixing page boundary
                 Addr::IND => {
                     let b = self.read_byte(self.addr_data);
@@ -1054,6 +1125,7 @@ impl Cpu {
         self.status = Flags6502::U;
 
         self.fetched = 0;
+        self.cycles = 7;
     }
 
     // Interrupt requests are a complex operation and only happen if the
@@ -1069,7 +1141,7 @@ impl Cpu {
     // has happened, in a similar way to a reset, a programmable address
     // is read form hard coded location 0xFFFE, which is subsequently
     // set to the program counter.
-    pub fn irq(&mut self, cycles: &mut u32) {
+    pub fn irq(&mut self) {
         // If interrupts are allowed
         if !self.get_flag(Flags6502::I) {
             // Push the program counter to the stack. It's 16-bits dont
@@ -1090,17 +1162,17 @@ impl Cpu {
             self.stkpt -= 1;
 
             // Read new program counter location from fixed address
-            self.addr_abs = 0xFFFE;
-            self.pc = self.read_word(self.addr_abs);
+            self.addr_data = 0xFFFE;
+            self.pc = self.read_word(self.addr_data);
 
             // IRQs take time
-            cycles.add_assign(2);
+            // cycles.add_assign(2);
         }
     }
     // A Non-Maskable Interrupt cannot be ignored. It behaves in exactly the
     // same way as a regular IRQ, but reads the new program counter address
     // from location 0xFFFA.
-    pub fn nmi(&mut self, cycles: &mut u32) {
+    pub fn nmi(&mut self) {
         if !self.get_flag(Flags6502::I) {
             self.write(
                 0x0100 + self.stkpt as u16,
@@ -1116,17 +1188,14 @@ impl Cpu {
             self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
             self.stkpt -= 1;
 
-            self.addr_abs = 0xFFFA;
-            self.pc = self.read_word(self.addr_abs);
+            self.addr_data = 0xFFFA;
+            self.pc = self.read_word(self.addr_data);
 
-            cycles.add_assign(3);
+            // cycles.add_assign(3);
         }
     }
 
     // internal helpers
-    pub fn complete(&mut self) -> bool {
-        self.cycles == 0
-    }
     pub fn check_n_flag(&mut self, value: u8) {
         self.set_flag(Flags6502::N, (value & 0x80) > 0);
     }

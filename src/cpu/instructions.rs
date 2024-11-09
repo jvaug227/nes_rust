@@ -1,3 +1,5 @@
+use super::CpuLog;
+
 #[derive(Clone, Copy)]
 pub struct Instruction {
     operate: u8,
@@ -383,4 +385,79 @@ pub mod Instructions {
     
     // TYA (Transfer Y to A); Affects Z;N
     pub const TYA_IMP: u8   = 0x98;     // 2
+}
+
+pub fn stringify_ins_from_log(log: &CpuLog) -> String {
+    let ins_name = opcode_to_str(log.opcode);
+    let addr_name = "$";
+    let has_read_value = false;
+    let read_value = "0";
+
+    if has_read_value {
+        format!("{ins_name} {addr_name} = {read_value}")
+    } else {
+        format!("{ins_name} {addr_name}")
+    }
+}
+
+fn opcode_to_str(opcode: u8) -> &'static str {
+    match opcode {
+        0x00 => { "NOP" },
+        0x01 => { "LDA" },
+        0x02 => { "LDX" },
+        0x03 => { "LDY" },
+        0x04 => { "ADC" },
+        0x05 => { "AND" },
+        0x06 => { "ASL" },
+        0x07 => { "BCC" },
+        0x08 => { "BCS" },
+        0x09 => { "BEQ" },
+        0x0A => { "BIT" },
+        0x0B => { "BMI" },
+        0x0C => { "BNE" },
+        0x0D => { "BPL" },
+        0x0E => { "BRK" },
+        0x0F => { "BVC" },
+        0x10 => { "BVS" },
+        0x11 => { "CLC" },
+        0x12 => { "CLD" },
+        0x13 => { "CLI" },
+        0x14 => { "CLV" },
+        0x15 => { "CMP" },
+        0x16 => { "CPX" },
+        0x17 => { "CPY" },
+        0x18 => { "DEC" },
+        0x19 => { "DEX" },
+        0x1A => { "DEY" },
+        0x1B => { "EOR" },
+        0x1C => { "INC" },
+        0x1D => { "INX" },
+        0x1E => { "INY" },
+        0x1F => { "JMP" },
+        0x20 => { "JSR" },
+        0x21 => { "LSR" },
+        0x22 => { "ORA" },
+        0x23 => { "PHA" },
+        0x24 => { "PHP" },
+        0x25 => { "PLA" },
+        0x26 => { "PLP" },
+        0x27 => { "ROL" },
+        0x28 => { "ROR" },
+        0x29 => { "RTI" },
+        0x2A => { "RTS" },
+        0x2B => { "SBC" },
+        0x2C => { "SEC" },
+        0x2D => { "SED" },
+        0x2E => { "SEI" },
+        0x2F => { "STA" },
+        0x30 => { "STX" },
+        0x31 => { "STY" },
+        0x32 => { "TAX" },
+        0x33 => { "TAY" },
+        0x34 => { "TSX" },
+        0x35 => { "TXA" },
+        0x36 => { "TXS" },
+        0x37 => { "TYA" },
+        _ => { "XXX" },
+    }
 }

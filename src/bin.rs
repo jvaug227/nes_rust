@@ -278,7 +278,7 @@ impl App {
                     Err(e) => { eprintln!("Error: {e}"); }
                 };
                 let current_time = std::time::Instant::now();
-                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.5) {
+                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.05) {
                     self.last_time = current_time;
                     self.cpu.clock();
                 }
@@ -296,8 +296,8 @@ impl App {
                     Key::Character(s) => {
                         match s {
                             "r" => { cpu.reset(); },
-                            "i" => { let mut cycles = 0; cpu.irq(&mut cycles); },
-                            "n" => { let mut cycles = 0; cpu.nmi(&mut cycles); },
+                            "i" => { cpu.irq(); },
+                            "n" => { cpu.nmi(); },
                             "p" => if !self.clock_cpu { cpu.clock(); },
                             _ => {}
                         }
@@ -348,6 +348,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         for i in 0..mirror_count {
             let mirror_start = 0x8000 + mirror_length*i;
             let mirror_end = mirror_start + mirror_length;
+            println!("Mirror {i} from {mirror_start:0>4X} to {mirror_end:0>4X}");
             cpu.bus_mut().ram[mirror_start .. mirror_end].copy_from_slice(program_range);   
         }
     } else {
@@ -361,9 +362,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // cpu.bus_mut().ram[0xFFFE] = 0x00;
     // cpu.bus_mut().ram[0xFFFF] = 0x80;
     cpu.reset();
-    cpu.pc = 0xC000;
+    cpu.pc = 0xC001;
     let a = cpu.bus().ram[0xC000];
     cpu.opcode = a;
+    let instruction = cpu.lookup[a as usize];
+    cpu.cpu_log.start_address = 0xC000;
+    cpu.cpu_log.opcode = instruction.op();
+    cpu.cpu_log.addrmode = instruction.addrmode();
+    cpu.cpu_log.start_cycle = 7;
 
     let mut app = App::new(cpu);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
