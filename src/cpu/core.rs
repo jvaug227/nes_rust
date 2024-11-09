@@ -1,4 +1,4 @@
-use bitflags::bitflags;
+use bitflags::{bitflags, Flags};
 use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::ops::AddAssign;
@@ -384,8 +384,9 @@ impl Cpu {
                     false
                 },
                 Addr::IDX => {
-                    self.addr_data = lo_byte(self.addr_data).wrapping_add(self.x) as u16;
-                    self.fetched = self.read_byte(self.addr_data); // put lo byte in fetched
+                    self.fetched = lo_byte(self.addr_data).wrapping_add(self.x);
+                    let b = self.read_byte(self.fetched as u16);
+                    set_lo_byte(&mut self.addr_data, b);
                     false
                 },
                 Addr::IDY => {
@@ -414,8 +415,11 @@ impl Cpu {
                     false
                 },
                 Addr::IDX => {
-                    self.fetched = self.read_byte(lo_byte(self.addr_data) as u16);
-                    self.addr_data = self.addr_data.wrapping_add(1);
+                    self.fetched = self.fetched.wrapping_add(1);
+                    let b = self.read_byte(self.fetched as u16);
+                    set_hi_byte(&mut self.addr_data, b);
+                    // self.fetched = self.read_byte(lo_byte(self.addr_data) as u16);
+                    // self.addr_data = self.addr_data.wrapping_add(1);
                     false
                 },
                 Addr::IDY => {
@@ -443,14 +447,13 @@ impl Cpu {
                     false
                 },
                 Addr::IDX => {
-                    let b = self.read_byte(self.addr_data);
-                    set_hi_byte(&mut self.addr_data, b);
-                    set_lo_byte(&mut self.addr_data, self.fetched);
+                    self.fetched = self.read_byte(self.addr_data);
+                    // set_hi_byte(&mut self.addr_data, b);
+                    // set_lo_byte(&mut self.addr_data, self.fetched);
                     false
                 },
                 Addr::IDY => {
-                    let b = self.read_byte(self.addr_data);
-                    self.addr_data = b as u16;
+                    self.fetched = self.read_byte(self.addr_data);
                     false
                 }
                 _ => { true }
@@ -461,12 +464,11 @@ impl Cpu {
                     true
                 },
                 Addr::IDX => {
-                    let b = self.read_byte(self.addr_data);
-                    self.addr_data = b as u16;
-                    false
+                    // let b = self.read_byte(self.addr_data);
+                    // self.addr_data = b as u16;
+                    true
                 },
                 Addr::IDY => {
-                    self.fetched = self.addr_data as u8;
                     true
                 },
                 _ => { true }
@@ -789,7 +791,7 @@ impl Cpu {
                 let temp = self.fetched >> 1;
                 self.check_nz_flags(temp);
 
-                if opcode_addr_mode == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -816,12 +818,8 @@ impl Cpu {
             }
             // Push Processor Stack
             (InsOp::PHP, PS::Exec0) => {
-                // Idk why these flags are set
-                // self.set_flag(Flags6502::B, true);
-                // self.set_flag(Flags6502::U, true);
-                self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-                // self.set_flag(Flags6502::B, false);
-                // self.set_flag(Flags6502::U, false);
+                // B and U are pushed as set
+                self.write(0x0100 + self.stkpt as u16, (self.get_status() | Flags6502::B | Flags6502::U).bits()); 
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 true
             }
@@ -835,9 +833,10 @@ impl Cpu {
             // Pull Processor Stack
             (InsOp::PLP, PS::Exec0) => {
                 self.stkpt = self.stkpt.wrapping_add(1);
-                self.status =
-                    Flags6502::from_bits_retain(self.read_byte(0x0100 + self.stkpt as u16));
-                self.set_flag(Flags6502::U, true);
+                self.status = Flags6502::from_bits_retain(
+                        self.read_byte(0x0100 + self.stkpt as u16) & 0b11001111
+                        | self.status.bits() & 0b00110000
+                );
                 true
             }
             // Rotate Left
@@ -845,7 +844,7 @@ impl Cpu {
                 let temp = ((self.fetched) << 1) | self.get_flag(Flags6502::C) as u8;
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
                 self.check_nz_flags(temp);
-                if opcode_addr_mode == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -862,11 +861,11 @@ impl Cpu {
             }
             // Rotate Right
             (InsOp::ROR, PS::Exec0) => {
-                let temp = ((self.get_flag(Flags6502::C) as u8) << 7) | self.fetched;
+                let temp = ((self.get_flag(Flags6502::C) as u8) << 7) | self.fetched >> 1;
                 self.set_flag(Flags6502::C, self.fetched & 0x01 > 0);
                 self.check_nz_flags(temp);
 
-                if opcode_addr_mode == InstructionAddressingModes::IMP {
+                if opcode_addr_mode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
