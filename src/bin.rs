@@ -113,7 +113,7 @@ impl EguiIntegrator {
     pub fn renderer_mut(&mut self) -> &mut egui_wgpu::Renderer { &mut self.renderer }
 }
 struct App {
-    cpu: Cpu,
+    nes: NESBoard,
     egui: Option<EguiIntegrator>,
     gpu: Option<Gpu>,
     clock_cpu: bool,
@@ -121,9 +121,10 @@ struct App {
 }
 
 impl App {
-    fn new(cpu: Cpu) -> Self {
+    fn new(cpu: Cpu, ram: Vec<u8>) -> Self {
+        let nes = NESBoard::new(ram);
         Self {
-            cpu, gpu: None, egui: None, clock_cpu: false, last_time: std::time::Instant::now(),
+            nes, gpu: None, egui: None, clock_cpu: false, last_time: std::time::Instant::now(),
         }
     }
 
@@ -280,7 +281,7 @@ impl App {
                 let current_time = std::time::Instant::now();
                 if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.05) {
                     self.last_time = current_time;
-                    self.cpu.clock();
+                    self.cpu.clock(&mut self.addr_bus,  &mut self.data_bus, &mut self.addr_rw);
                 }
             },
             WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
@@ -298,7 +299,7 @@ impl App {
                             "r" => { cpu.reset(); },
                             "i" => { cpu.irq(); },
                             "n" => { cpu.nmi(); },
-                            "p" => if !self.clock_cpu { cpu.clock(); },
+                            "p" => if !self.clock_cpu { cpu.clock(&mut self.addr_bus,  &mut self.data_bus, &mut self.addr_rw); },
                             _ => {}
                         }
                     }
@@ -318,15 +319,39 @@ impl App {
     }
 }
 
-/**
- * TODO: insert bytes into ram
- * 
- */
+struct NESBoard {
+    cpu: Cpu,
+    ram: Vec<u8>,
+    addr_rw: bool,
+    addr_bus: u16,
+    data_bus: u8,
+}
+
+impl NESBoard {
+    fn new(ram: Vec<u8>) -> NESBoard {
+        NESBoard { ram, cpu: Cpu::new(), addr_rw: true, addr_bus: 0, data_bus: 0 }
+    }
+
+    // Emulate one master clok cycle
+    fn clock(&mut self) {
+        self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, false);
+        if self.addr_rw {
+            let addr = self.addr_bus as usize;
+            self.data_bus = self.ram[addr];
+        }
+        self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true);
+        if !self.addr_rw {
+            let addr = self.addr_bus as usize;
+            self.ram[addr] = self.data_bus;
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
 
     let mut bus: Bus = Bus::new();
-    let mut cpu = Cpu::new(Rc::new(RefCell::new(bus)));
+    let mut cpu = Cpu::new();
 
     //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
     //let program = include_bytes!("official_only.nes");
@@ -338,7 +363,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
     println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
 
+    const RAM_SIZE: usize = 256 * 2048;
     const PROGRAM_RANGE: usize = 32768;
+    let mut ram = vec![0u8; RAM_SIZE];
     let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
     let mirror_length = cartridge_data.prg_rom_range.len();
     // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
@@ -349,10 +376,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mirror_start = 0x8000 + mirror_length*i;
             let mirror_end = mirror_start + mirror_length;
             println!("Mirror {i} from {mirror_start:0>4X} to {mirror_end:0>4X}");
-            cpu.bus_mut().ram[mirror_start .. mirror_end].copy_from_slice(program_range);   
+            ram[mirror_start .. mirror_end].copy_from_slice(program_range);   
         }
     } else {
-        cpu.bus_mut().ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
+        ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
     }
 
     // cpu.bus_mut().ram[0xFFFA] = 0x00;
@@ -363,7 +390,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // cpu.bus_mut().ram[0xFFFF] = 0x80;
     cpu.reset();
     cpu.pc = 0xC001;
-    let a = cpu.bus().ram[0xC000];
+    let a = ram[0xC000];
     cpu.opcode = a;
     let instruction = cpu.lookup[a as usize];
     cpu.cpu_log.start_address = 0xC000;
@@ -371,7 +398,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     cpu.cpu_log.addrmode = instruction.addrmode();
     cpu.cpu_log.start_cycle = 7;
 
-    let mut app = App::new(cpu);
+    let mut app = App::new(cpu, ram);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
 

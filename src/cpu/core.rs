@@ -1,7 +1,5 @@
 use bitflags::bitflags;
-use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
-use std::rc::Rc;
 
 use crate::cpu::instructions::stringify_ins_from_log;
 
@@ -212,8 +210,6 @@ pub struct CpuLog {
 }
 
 pub struct Cpu {
-    bus: Rc<RefCell<Bus>>,
-
     // Registers
     pub a: u8, // Accumulator
     pub x: u8,
@@ -292,9 +288,8 @@ fn set_hi_byte(word: &mut u16, byte: u8) {
 
 #[allow(non_snake_case)]
 impl Cpu {
-    pub fn new(bus: Rc<RefCell<Bus>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            bus,
             a: 0,
             x: 0,
             y: 0,
@@ -314,25 +309,6 @@ impl Cpu {
 
     pub fn cycles(&mut self) -> usize {
         self.cycles
-    }
-
-    // Bus
-    pub fn write(&mut self, addr: u16, byte: u8) {
-        self.bus_mut().write(addr, byte);
-    }
-    pub fn read_byte(&self, addr: u16) -> u8 {
-        self.bus().read(addr, false)
-    }
-    pub fn read_word(&self, addr: u16) -> u16 {
-        let lo: u16 = self.read_byte(addr) as u16;
-        let hi: u16 = self.read_byte(addr + 1) as u16;
-        lo | (hi << 8)
-    }
-    pub fn bus(&self) -> Ref<Bus> {
-        self.bus.borrow()
-    }
-    pub fn bus_mut(&self) -> RefMut<Bus> {
-        self.bus.borrow_mut()
     }
 
     fn log_byte0(&mut self, b: u8) {
@@ -378,15 +354,19 @@ impl Cpu {
     }
 
     // Perform one instruction worth of emulation
-    pub fn clock(&mut self) -> bool {
+    pub fn clock(&mut self, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         // println!("Clock: {:?}", self.pipeline_status);
         let instruction = self.lookup[self.opcode as usize];
-        let instruction_finished = self.execute(instruction.op(), instruction.addrmode());
+        let instruction_finished = self.execute(instruction.op(), instruction.addrmode(), address_bus, data_bus, address_rw, phi);
         self.cycles = self.cycles.wrapping_add(1);
-        if instruction_finished {
+        if instruction_finished && !phi {
+            *address_bus = self.pc;
+            *address_rw = true;
+        }
+        if instruction_finished && phi {
             self.print_log();
 
-            self.opcode = self.read_byte(self.pc);
+            self.opcode = *data_bus;
             self.cpu_log.start_address = self.pc;
             self.pc += 1;
 
@@ -400,153 +380,191 @@ impl Cpu {
         instruction_finished
     }
 
+    fn execute(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+
+        if !matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Store) {
+            let finished_addressing = self.execute_addrmode(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+            if !finished_addressing { if !self.page_boundary_crossed { self.pipeline_status.advance(); } return false; }
+            else { self.pipeline_status = PipelineStatus::Exec0; }
+        }
+        let finished_executing = self.execute_instruction(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+        if !finished_executing { self.pipeline_status.advance(); }
+        else { self.pipeline_status = PipelineStatus::Addr0; }
+        finished_executing
+    }
+
     /// Returns true if the instruction should immediately begin executing
     /// an instruction  
     /// Returns false if the cpu should wait for a clock cycle
-    fn execute_addrmode(&mut self, addrmode: u8) -> bool {
+    fn execute_addrmode(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionAddressingModes as Addr;
+        use InstructionOperations as InsOp;
+        let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
 
-        let opcode = self.lookup[self.opcode as usize].op();
         // Page boundary incurrs a +1 cycle cost
         if self.page_boundary_crossed {
             // Probably close-enough to a realistic re-creation
             let hi_byte = hi_byte(self.addr_data).wrapping_add(1);
             set_hi_byte(&mut self.addr_data, hi_byte);
             // Could also probably do something like, might infact get compiler-optimized to this
-            // self.addr_data = self.addr_data.wrapping_add(0x10);
+            // self.addr_data = self.addr_data.wrapping_add(0x0100);
             self.page_boundary_crossed = false;
             return false;
         }
-        match self.pipeline_status {
-            PipelineStatus::Addr0 => match addrmode {
-                Addr::IMP | Addr::ACC => { self.fetched = self.a; true },
-                _ => {
-                    self.addr_data = self.read_byte(self.pc) as u16;
-                    if !matches!(addrmode, Addr::ACC | Addr::IMP) {
-                        self.log_byte1(self.addr_data as u8);
-                    }
-                    self.pc += 1;
-                    false
-                }
-            },
-            PipelineStatus::Addr1 => match addrmode {
-                Addr::IMM | Addr::REL => { self.fetched = self.addr_data as u8; true }, // Rel offset is stored in both fetched and addr_data
-                Addr::ZP0 => {self.fetched = self.read_byte(self.addr_data); false },
-                Addr::ZPX => {self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
-                Addr::ZPY => {self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
-                Addr::ABS | Addr::ABX | Addr::ABY | Addr::IND => {
-                    let offset = match addrmode {
-                        Addr::ABX => { self.x },
-                        Addr::ABY => { self.y },
-                        _ => { 0 },
-                    };
-                    let old_lo_byte = lo_byte(self.addr_data);
-                    let new_lo_byte = old_lo_byte.wrapping_add(offset);
-                    set_lo_byte(&mut self.addr_data, new_lo_byte);
+        let offset = match addrmode {
+            Addr::ABX | Addr::ZPX => { self.x },
+            Addr::ABY | Addr::ZPY => { self.y },
+            _ => { 0 },
+        };
+        match (addrmode, self.pipeline_status, phi) {
+            (Addr::IMP, PipelineStatus::Addr0, false) => { false },
+            (Addr::IMP, PipelineStatus::Addr0, true ) => { true },
+            (Addr::ACC, PipelineStatus::Addr0, false) => { self.fetched = self.a; false },
+            (Addr::ACC, PipelineStatus::Addr0, true ) => { true },
+            (_, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
+            (_, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
 
-                    // page-boundary crossed if we wrapped around and
-                    // addition creates a lower value than we started with
-                    self.page_boundary_crossed = new_lo_byte < old_lo_byte;
+            (Addr::IMM | Addr::REL, PipelineStatus::Addr1, false) => { true }, // Rel offset is stored in both fetched and addr_data
+            (Addr::IMM | Addr::REL, PipelineStatus::Addr1, true ) => { true }, // shouldn't be reached but nonetheless
 
-                    let b = self.read_byte(self.pc);
-                    self.pc += 1;
-                    self.log_byte2(b);
-                    set_hi_byte(&mut self.addr_data, b);
-                    false
-                },
-                Addr::IDX => {
-                    self.fetched = lo_byte(self.addr_data).wrapping_add(self.x);
-                    let b = self.read_byte(self.fetched as u16);
-                    set_lo_byte(&mut self.addr_data, b);
-                    false
-                },
-                Addr::IDY => {
-                    self.fetched = self.read_byte(self.addr_data); // put lo byte in fetched
-                    self.addr_data = self.addr_data.wrapping_add(1); // store next zp address in addr_data
-                    false
+            (Addr::ZP0, PipelineStatus::Addr1, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::ZP0, PipelineStatus::Addr1, true ) => { self.fetched = *data_bus; true },
+            (Addr::ZP0, PipelineStatus::Addr2, false) => { true },
+            (Addr::ZP0, PipelineStatus::Addr2, true ) => { true }, // shouldn't be reached but nonetheless
+
+            (Addr::ZPX, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
+            (Addr::ZPX, PipelineStatus::Addr1, true ) => { false }, // should dummy-read maybe
+            (Addr::ZPX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::ZPX, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
+            (Addr::ZPX, PipelineStatus::Addr3, false) => { true },
+            (Addr::ZPX, PipelineStatus::Addr3, true ) => { true }, // shouldn't be reached but nonetheless
+
+            (Addr::ZPY, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
+            (Addr::ZPY, PipelineStatus::Addr1, true ) => { false }, // should dummy-read maybe
+            (Addr::ZPY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::ZPY, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
+            (Addr::ZPY, PipelineStatus::Addr3, false) => { true },
+            (Addr::ZPY, PipelineStatus::Addr3, true ) => { true }, // shouldn't be reached but nonetheless
+
+            (Addr::ABS, PipelineStatus::Addr1, false) => { *address_bus = self.pc; *address_rw = true; self.pc += 1; false }
+            (Addr::ABS, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABS, PipelineStatus::Addr2, false) => { 
+                if opcode == InstructionOperations::JMP {
+                    self.pc = self.addr_data;
+                    return true;
                 }
-                _ => { true }
-            },
-            PipelineStatus::Addr2 => match addrmode {
-                Addr::ZP0 => { true },
-                Addr::ZPX | Addr::ZPY | Addr::ABS | Addr::ABX | Addr::ABY => {
-                    if opcode == InstructionOperations::JMP {
-                        self.pc = self.addr_data;
-                        return true;
-                    }
-                    self.fetched = self.read_byte(self.addr_data);
-                    false
-                },
-                Addr::IND => {
-                    let b = self.read_byte(self.addr_data);
-                    set_lo_byte(&mut self.pc, b);
-                    // emulate indirect page boundary bug
-                    let new_lo_byte = lo_byte(self.addr_data).wrapping_add(1);
-                    set_lo_byte(&mut self.addr_data, new_lo_byte);
-                    false
-                },
-                Addr::IDX => {
-                    self.fetched = self.fetched.wrapping_add(1);
-                    let b = self.read_byte(self.fetched as u16);
-                    set_hi_byte(&mut self.addr_data, b);
-                    // self.fetched = self.read_byte(lo_byte(self.addr_data) as u16);
-                    // self.addr_data = self.addr_data.wrapping_add(1);
-                    false
-                },
-                Addr::IDY => {
-                    let zpAddr = lo_byte(self.addr_data) as u16; // grab zp address before we replace it
-                    let old_lo_byte = self.fetched;
-                    let new_lo_byte = self.fetched.wrapping_add(self.y);
-                    set_lo_byte(&mut self.addr_data, new_lo_byte);
-                    self.page_boundary_crossed = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and 
-                                                                            // addition creates a lower value than we started with
-                    let b = self.read_byte(zpAddr); // read zp address for hi byte
-                    set_hi_byte(&mut self.addr_data, b);
-                    false
-                }
-                _ => { true }
-            },
-            PipelineStatus::Addr3 => match addrmode {
-                Addr::ZPX | Addr::ZPY | Addr::ABS | Addr::ABY => { true },
-                Addr::ABX => {
-                    use InstructionOperations as InsOp;
-                    !matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL)
-                } // if this is DEC, this cycle is dedicated to fixing page boundary
-                Addr::IND => {
-                    let b = self.read_byte(self.addr_data);
-                    set_hi_byte(&mut self.pc, b);
-                    false
-                },
-                Addr::IDX => {
-                    self.fetched = self.read_byte(self.addr_data);
-                    // set_hi_byte(&mut self.addr_data, b);
-                    // set_lo_byte(&mut self.addr_data, self.fetched);
-                    false
-                },
-                Addr::IDY => {
-                    self.fetched = self.read_byte(self.addr_data);
-                    false
-                }
-                _ => { true }
-            },
-            PipelineStatus::Addr4 => match addrmode {
-                Addr::ABX => { true },
-                Addr::IND => {
-                    true
-                },
-                Addr::IDX => {
-                    // let b = self.read_byte(self.addr_data);
-                    // self.addr_data = b as u16;
-                    true
-                },
-                Addr::IDY => {
-                    true
-                },
-                _ => { true }
-            },
-            _ => { // assume IND,X addrmode
-                    self.fetched = self.addr_data as u8; true
+                *address_bus = self.addr_data; 
+                *address_rw = true; 
+                false 
             }
+            (Addr::ABS, PipelineStatus::Addr2, true) => { self.fetched = *data_bus; false }
+            (Addr::ABS, PipelineStatus::Addr3, false) => {true},
+            (Addr::ABS, PipelineStatus::Addr3, true) => {true},
+
+            (Addr::ABX, PipelineStatus::Addr1, false) => {
+                let old_lo_byte = lo_byte(self.addr_data);
+                let new_lo_byte = old_lo_byte.wrapping_add(offset);
+                set_lo_byte(&mut self.addr_data, new_lo_byte);
+
+                // page-boundary crossed if we wrapped around and
+                // addition creates a lower value than we started with
+                self.page_boundary_crossed = new_lo_byte < old_lo_byte;
+
+                *address_bus = self.pc;
+                *address_rw = true;
+                self.pc += 1;
+
+                false
+            },
+            (Addr::ABX, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::ABX, PipelineStatus::Addr2, true) => { self.fetched = *data_bus; false }
+            (Addr::ABX, PipelineStatus::Addr3, false) => { !is_rwm } // if this is DEC, this cycle is dedicated to fixing page boundary
+            (Addr::ABX, PipelineStatus::Addr3, true) => { false }
+
+            (Addr::ABY, PipelineStatus::Addr1, false) => {
+                let old_lo_byte = lo_byte(self.addr_data);
+                let new_lo_byte = old_lo_byte.wrapping_add(offset);
+                set_lo_byte(&mut self.addr_data, new_lo_byte);
+
+                // page-boundary crossed if we wrapped around and
+                // addition creates a lower value than we started with
+                self.page_boundary_crossed = new_lo_byte < old_lo_byte;
+
+                *address_bus = self.pc;
+                *address_rw = true;
+                self.pc += 1;
+
+                false
+            },
+            (Addr::ABY, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::ABY, PipelineStatus::Addr2, true) => { self.fetched = *data_bus; false }
+            (Addr::ABY, PipelineStatus::Addr3, false) => { true },
+            (Addr::ABY, PipelineStatus::Addr3, true) => { true },
+
+            (Addr::IND, PipelineStatus::Addr1, false) => { *address_bus = self.pc; *address_rw = true; self.pc += 1; false },
+            (Addr::IND, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::IND, PipelineStatus::Addr2, false) => {
+                *address_bus = self.addr_data;
+                *address_rw = true;
+                // emulate indirect page boundary bug
+                let new_lo_byte = lo_byte(self.addr_data).wrapping_add(1);
+                set_lo_byte(&mut self.addr_data, new_lo_byte);
+                false
+            },
+            (Addr::IND, PipelineStatus::Addr2, true) => { let b = *data_bus; set_lo_byte(&mut self.pc, b); false }
+            (Addr::IND, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false },
+            (Addr::IND, PipelineStatus::Addr3, true) => { let b = *data_bus; set_hi_byte(&mut self.pc, b); false },
+
+            (Addr::IDX, PipelineStatus::Addr1, false) => {
+                self.fetched = lo_byte(self.addr_data).wrapping_add(self.x);
+                *address_bus = self.fetched as u16;
+                *address_rw = true;
+                false
+            },
+            (Addr::IDX, PipelineStatus::Addr1, true) => {
+                let b = *data_bus;
+                set_lo_byte(&mut self.addr_data, b);
+                false
+            }
+
+            (Addr::IDX, PipelineStatus::Addr2, false) => {
+                self.fetched = self.fetched.wrapping_add(1);
+                *address_bus = self.fetched as u16;
+                *address_rw = true;
+                false
+            },
+            (Addr::IDX, PipelineStatus::Addr2, true) => { let b = *data_bus; set_hi_byte(&mut self.addr_data, b); false },
+            (Addr::IDX, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false },
+            (Addr::IDX, PipelineStatus::Addr3, true) => { self.fetched = *data_bus; false },
+
+            (Addr::IDY, PipelineStatus::Addr2, false) => {
+                let zpAddr = lo_byte(self.addr_data) as u16; // grab zp address before we replace it
+                let old_lo_byte = self.fetched;
+                let new_lo_byte = self.fetched.wrapping_add(self.y);
+                set_lo_byte(&mut self.addr_data, new_lo_byte);
+                self.page_boundary_crossed = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and 
+                                                                        // addition creates a lower value than we started with
+                *address_bus = zpAddr;
+                *address_rw = true;
+                false
+            }
+            (Addr::IDY, PipelineStatus::Addr2, true) => { let b = *data_bus; set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::IDY, PipelineStatus::Addr1, false) => {
+                *address_bus = self.addr_data;
+                *address_rw = true;
+                self.addr_data = self.addr_data.wrapping_add(1); // store next zp address in addr_data
+                false
+            }
+            (Addr::IDY, PipelineStatus::Addr1, true) => {
+                self.fetched = *data_bus; // put lo byte in fetched
+                false
+            }
+            (Addr::IDY, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false }
+            (Addr::IDY, PipelineStatus::Addr3, true) => { self.fetched = *data_bus; false }
+
+            _ => { true }
         }
     }
 
@@ -556,19 +574,11 @@ impl Cpu {
     /// and (ind),y being 5. In STA, abs,x and abs,y are 5 while (ind),y is 6.
     /// Edit: looks to be caused by write-instructions always fixing the PCH, even if it doesn't
     /// need it
-    fn execute_instruction(&mut self, instruction: u8) -> bool {
+    fn execute_instruction(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionOperations as InsOp;
         use PipelineStatus as PS;
-        let opcode_addr_mode = self.lookup[self.opcode as usize].addrmode();
-        match (instruction, self.pipeline_status) {
+        match (opcode, self.pipeline_status) {
             (InsOp::NOP, _) => {
-                // NESDEV unofficial opcodes
-                // match self.opcode {
-                //     0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {
-                //         cycles.add_assign(1);
-                //     }
-                //     _ => {}
-                // }
                 true
             }
             // Add with carry
@@ -596,7 +606,7 @@ impl Cpu {
                 self.check_nz_flags(temp);
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
 
-                if opcode_addr_mode == InstructionAddressingModes::ACC {
+                if addrmode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -780,7 +790,7 @@ impl Cpu {
             (InsOp::INC, PS::Exec0) => {
                 let temp = self.increment(self.fetched);
                 self.check_nz_flags(temp);
-                if opcode_addr_mode == InstructionAddressingModes::ACC{ self.a = temp; true }
+                if addrmode == InstructionAddressingModes::ACC{ self.a = temp; true }
                 else { self.fetched = temp; false }
             },
             (InsOp::INC, PS::Exec1) => {
@@ -862,7 +872,7 @@ impl Cpu {
                 let temp = self.fetched >> 1;
                 self.check_nz_flags(temp);
 
-                if opcode_addr_mode == InstructionAddressingModes::ACC {
+                if addrmode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -915,7 +925,7 @@ impl Cpu {
                 let temp = ((self.fetched) << 1) | self.get_flag(Flags6502::C) as u8;
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
                 self.check_nz_flags(temp);
-                if opcode_addr_mode == InstructionAddressingModes::ACC {
+                if addrmode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -936,7 +946,7 @@ impl Cpu {
                 self.set_flag(Flags6502::C, self.fetched & 0x01 > 0);
                 self.check_nz_flags(temp);
 
-                if opcode_addr_mode == InstructionAddressingModes::ACC {
+                if addrmode == InstructionAddressingModes::ACC {
                     self.a = temp;
                     true
                 } else {
@@ -1093,19 +1103,6 @@ impl Cpu {
         }
     }
 
-    fn execute(&mut self, instruction: u8, addrmode: u8) -> bool {
-
-        if !matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Store) {
-            let finished_addressing = self.execute_addrmode(addrmode);
-            if !finished_addressing { if !self.page_boundary_crossed { self.pipeline_status.advance(); } return false; }
-            else { self.pipeline_status = PipelineStatus::Exec0; }
-        }
-        let finished_executing = self.execute_instruction(instruction);
-        if !finished_executing { self.pipeline_status.advance(); }
-        else { self.pipeline_status = PipelineStatus::Addr0; }
-        finished_executing
-    }
-
     // Forces the 6502 into a known state. This is hard-wired inside the CPU. The
     // registers are set to 0x00, the status register is cleared except for unused
     // bit which remains at 1. An absolute address is read from location 0xFFFC
@@ -1114,18 +1111,18 @@ impl Cpu {
     // memory to start executing from. Typically the programmer would set the value
     // at location 0xFFFC at compile time.
     pub fn reset(&mut self) {
-        self.addr_data = 0xFFFC;
-
-        self.pc = self.read_word(self.addr_data);
-
-        self.a = 0;
-        self.x = 0;
-        self.y = 0;
-        self.stkpt = 0xFD;
-        self.status = Flags6502::U;
-
-        self.fetched = 0;
-        self.cycles = 7;
+        // self.addr_data = 0xFFFC;
+        //
+        // self.pc = self.read_word(self.addr_data);
+        //
+        // self.a = 0;
+        // self.x = 0;
+        // self.y = 0;
+        // self.stkpt = 0xFD;
+        // self.status = Flags6502::U;
+        //
+        // self.fetched = 0;
+        // self.cycles = 7;
     }
 
     // Interrupt requests are a complex operation and only happen if the
@@ -1142,57 +1139,57 @@ impl Cpu {
     // is read form hard coded location 0xFFFE, which is subsequently
     // set to the program counter.
     pub fn irq(&mut self) {
-        // If interrupts are allowed
-        if !self.get_flag(Flags6502::I) {
-            // Push the program counter to the stack. It's 16-bits dont
-            // forget so that takes two pushes
-            self.write(
-                0x0100 + self.stkpt as u16,
-                ((self.pc >> 8) & 0x00FF) as u8,
-            );
-            self.stkpt -= 1;
-            self.write(0x0100 + self.stkpt as u16, (self.pc & 0x00FF) as u8);
-            self.stkpt -= 1;
-
-            // Then Push the status register to the stack
-            self.set_flag(Flags6502::B, false);
-            self.set_flag(Flags6502::U, true);
-            self.set_flag(Flags6502::I, true);
-            self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-            self.stkpt -= 1;
-
-            // Read new program counter location from fixed address
-            self.addr_data = 0xFFFE;
-            self.pc = self.read_word(self.addr_data);
-
-            // IRQs take time
-            // cycles.add_assign(2);
-        }
+        // // If interrupts are allowed
+        // if !self.get_flag(Flags6502::I) {
+        //     // Push the program counter to the stack. It's 16-bits dont
+        //     // forget so that takes two pushes
+        //     self.write(
+        //         0x0100 + self.stkpt as u16,
+        //         ((self.pc >> 8) & 0x00FF) as u8,
+        //     );
+        //     self.stkpt -= 1;
+        //     self.write(0x0100 + self.stkpt as u16, (self.pc & 0x00FF) as u8);
+        //     self.stkpt -= 1;
+        //
+        //     // Then Push the status register to the stack
+        //     self.set_flag(Flags6502::B, false);
+        //     self.set_flag(Flags6502::U, true);
+        //     self.set_flag(Flags6502::I, true);
+        //     self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
+        //     self.stkpt -= 1;
+        //
+        //     // Read new program counter location from fixed address
+        //     self.addr_data = 0xFFFE;
+        //     self.pc = self.read_word(self.addr_data);
+        //
+        //     // IRQs take time
+        //     // cycles.add_assign(2);
+        // }
     }
     // A Non-Maskable Interrupt cannot be ignored. It behaves in exactly the
     // same way as a regular IRQ, but reads the new program counter address
     // from location 0xFFFA.
     pub fn nmi(&mut self) {
-        if !self.get_flag(Flags6502::I) {
-            self.write(
-                0x0100 + self.stkpt as u16,
-                hi_byte(self.pc),
-            );
-            self.stkpt -= 1;
-            self.write(0x0100 + self.stkpt as u16, lo_byte(self.pc));
-            self.stkpt -= 1;
-
-            self.set_flag(Flags6502::B, false);
-            self.set_flag(Flags6502::U, true);
-            self.set_flag(Flags6502::I, true);
-            self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-            self.stkpt -= 1;
-
-            self.addr_data = 0xFFFA;
-            self.pc = self.read_word(self.addr_data);
-
-            // cycles.add_assign(3);
-        }
+        // if !self.get_flag(Flags6502::I) {
+        //     self.write(
+        //         0x0100 + self.stkpt as u16,
+        //         hi_byte(self.pc),
+        //     );
+        //     self.stkpt -= 1;
+        //     self.write(0x0100 + self.stkpt as u16, lo_byte(self.pc));
+        //     self.stkpt -= 1;
+        //
+        //     self.set_flag(Flags6502::B, false);
+        //     self.set_flag(Flags6502::U, true);
+        //     self.set_flag(Flags6502::I, true);
+        //     self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
+        //     self.stkpt -= 1;
+        //
+        //     self.addr_data = 0xFFFA;
+        //     self.pc = self.read_word(self.addr_data);
+        //
+        //     // cycles.add_assign(3);
+        // }
     }
 
     // internal helpers
