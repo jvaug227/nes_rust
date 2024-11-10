@@ -1,6 +1,5 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, io::Write, sync::Arc};
 use egui::{ Ui, Color32, RichText};
-use instructions::lookup;
 use nes_rust::{cpu::*, cartidge::CartridgeData };
 use wgpu::Backends;
 use winit::{
@@ -157,7 +156,7 @@ impl App {
         size.width = size.width.max(1);
         size.height = size.height.max(1);
 
-        let surface_capabilities = surface.get_capabilities(&adapter);
+        // let _surface_capabilities = surface.get_capabilities(&adapter);
         let surface_config = 
             match surface.get_default_config(&adapter, size.width, size.height) {
                 Some(config) => config,
@@ -197,13 +196,13 @@ impl App {
 
             ui.label("NES (6502) Emulator");
 
-            draw_ram(ui, &ram, 0x0000, 16, 16);
+            draw_ram(ui, ram, 0x0000, 16, 16);
             ui.separator();
-            draw_ram(ui, &ram, 0xC000, 16, 16);
+            draw_ram(ui, ram, 0xC000, 16, 16);
             ui.separator();
-            draw_ram(ui, &ram, 0xC500, 16, 16);
+            draw_ram(ui, ram, 0xC500, 16, 16);
             ui.separator();
-            draw_ram(ui, &ram, 0xC700, 16, 16);
+            draw_ram(ui, ram, 0xC700, 16, 16);
         });
 
 
@@ -263,7 +262,7 @@ impl App {
         fn window_event(
             &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
+        _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
         if let (Some(egui), Some(gpu)) = (self.egui.as_mut(), self.gpu.as_ref()) {
@@ -280,7 +279,7 @@ impl App {
                     Err(e) => { eprintln!("Error: {e}"); }
                 };
                 let current_time = std::time::Instant::now();
-                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.05) {
+                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
                     self.last_time = current_time;
                     self.nes.clock();
                 }
@@ -321,6 +320,8 @@ impl App {
 
 struct NESBoard {
     cpu: Cpu,
+    cpu_copy: Cpu,
+    debug_buffer: Vec<u8>,
     ram: Vec<u8>,
     addr_rw: bool,
     addr_bus: u16,
@@ -329,7 +330,8 @@ struct NESBoard {
 
 impl NESBoard {
     fn new(cpu: Cpu, ram: Vec<u8>) -> NESBoard {
-        NESBoard { ram, cpu, addr_rw: true, addr_bus: 0, data_bus: 0 }
+        let debug_buffer = b"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX\n".to_vec();
+        NESBoard { ram, cpu, cpu_copy: cpu, debug_buffer, addr_rw: true, addr_bus: 0, data_bus: 0 }
     }
 
     // Emulate one master clok cycle
@@ -339,11 +341,60 @@ impl NESBoard {
             let addr = self.addr_bus as usize;
             self.data_bus = self.ram[addr];
         }
-        self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true);
+        if self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true) {
+            self.print_log();
+            self.cpu_copy = self.cpu; // update the copy
+        }
         if !self.addr_rw {
             let addr = self.addr_bus as usize;
             self.ram[addr] = self.data_bus;
         }
+    }
+
+    fn write_hex_to_buffer(mut value: u16, buffer: &mut [u8], start: usize, digits: usize) {
+        for digit in (0..digits).rev() {
+            let a = b'0' + (value % 16) as u8;
+            let a = if a > b'9' { a + 7 } else { a };
+            value /= 16;
+            buffer[start+digit] = a;
+        }
+    }
+
+    fn write_decimal_to_buffer(mut value: usize, buffer: &mut [u8], start: usize, digits: usize) {
+        for digit in (0..digits).rev() {
+            let a = if value > 0 { b'0' + (value % 10) as u8 } else { b' ' };
+            value /= 10;
+            buffer[start+digit] = a;
+        }
+    }
+
+    fn print_log(&mut self) {
+        let byte1: u8 = 0;
+        let byte2: u8 = 0;
+        // let ins_str: String = stringify_ins_from_log(&self.cpu_copy);
+        let cycles: usize = self.cpu_copy.cycles;
+        let ppucycles = cycles * 3;
+        let ppu1: usize = ppucycles / 340;
+        let ppu2: usize = ppucycles % 340;
+        // 0         1         2         3         4         5         6         7         8         9
+        // 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234
+        //"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX"
+        let buffer = &mut self.debug_buffer;
+        Self::write_hex_to_buffer(self.cpu_copy.pc, buffer, 0, 4);
+        Self::write_hex_to_buffer(self.cpu_copy.opcode as u16, buffer, 6, 2);
+        Self::write_hex_to_buffer(byte1 as u16, buffer, 9, 2);
+        Self::write_hex_to_buffer(byte2 as u16, buffer, 12, 2);
+        Self::write_hex_to_buffer(self.cpu_copy.a as u16, buffer, 50, 2);
+        Self::write_hex_to_buffer(self.cpu_copy.x as u16, buffer, 55, 2);
+        Self::write_hex_to_buffer(self.cpu_copy.y as u16, buffer, 60, 2);
+        Self::write_hex_to_buffer(self.cpu_copy.get_status().bits() as u16, buffer, 65, 2);
+        Self::write_hex_to_buffer(self.cpu_copy.stkpt as u16, buffer, 71, 2);
+        Self::write_decimal_to_buffer(ppu1, buffer, 78, 3);
+        Self::write_decimal_to_buffer(ppu2, buffer, 82, 3);
+        Self::write_decimal_to_buffer(cycles, buffer, 90, 5);
+        let mut stdout = std::io::stdout().lock();
+        let _e = stdout.write_all(&self.debug_buffer);
+        let _e = stdout.flush();
     }
 }
 
@@ -391,11 +442,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     cpu.pc = 0xC001;
     let a = ram[0xC000];
     cpu.opcode = a;
-    let instruction = lookup::LOOKUP_TABLE[a as usize];
-    cpu.cpu_log.start_address = 0xC000;
-    cpu.cpu_log.opcode = instruction.op();
-    cpu.cpu_log.addrmode = instruction.addrmode();
-    cpu.cpu_log.start_cycle = 7;
     cpu.cycles = 7;
     cpu.stkpt = 0xFD;
     cpu.set_flags(Flags6502::I | Flags6502::U);
@@ -403,8 +449,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(cpu, ram);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
-
-    thread_local! {}
 
     Ok(())
 }
