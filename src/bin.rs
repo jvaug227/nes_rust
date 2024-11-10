@@ -1,5 +1,6 @@
-use std::{cell::RefCell, error::Error, rc::Rc, sync::Arc};
+use std::{error::Error, sync::Arc};
 use egui::{ Ui, Color32, RichText};
+use instructions::lookup;
 use nes_rust::{cpu::*, cartidge::CartridgeData };
 use wgpu::Backends;
 use winit::{
@@ -11,13 +12,13 @@ use winit::{
 };
 use anyhow::{anyhow, Result};
 
-fn draw_ram(ui: & mut Ui, bus: &Bus, addr: u16, rows: u32, cols: usize) {
+fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
     ui.vertical_centered_justified(|ui| {
         for row in 0..rows {
             let row_addr = addr as usize + (cols * row as usize);
             let end = row_addr + cols;
             //let byte_vec: Vec<u8> = vec![];
-            let a = &bus.ram[row_addr..end];
+            let a = &ram[row_addr..end];
             
             ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, a));
         }
@@ -122,7 +123,7 @@ struct App {
 
 impl App {
     fn new(cpu: Cpu, ram: Vec<u8>) -> Self {
-        let nes = NESBoard::new(ram);
+        let nes = NESBoard::new(cpu, ram);
         Self {
             nes, gpu: None, egui: None, clock_cpu: false, last_time: std::time::Instant::now(),
         }
@@ -169,7 +170,7 @@ impl App {
 
     fn draw(&mut self) -> Result<()> {
 
-        let (Some(gpu), Some(egui), cpu) = (self.gpu.as_ref(), self.egui.as_mut(), &self.cpu) else { return Err(anyhow!("Can't draw yet...")) };
+        let (Some(gpu), Some(egui), cpu, ram) = (self.gpu.as_ref(), self.egui.as_mut(), &self.nes.cpu, &self.nes.ram) else { return Err(anyhow!("Can't draw yet...")) };
 
         let mut encoder = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("encoder"),
@@ -196,13 +197,13 @@ impl App {
 
             ui.label("NES (6502) Emulator");
 
-            draw_ram(ui, &cpu.bus(), 0x0000, 16, 16);
+            draw_ram(ui, &ram, 0x0000, 16, 16);
             ui.separator();
-            draw_ram(ui, &cpu.bus(), 0xC000, 16, 16);
+            draw_ram(ui, &ram, 0xC000, 16, 16);
             ui.separator();
-            draw_ram(ui, &cpu.bus(), 0xC500, 16, 16);
+            draw_ram(ui, &ram, 0xC500, 16, 16);
             ui.separator();
-            draw_ram(ui, &cpu.bus(), 0xC700, 16, 16);
+            draw_ram(ui, &ram, 0xC700, 16, 16);
         });
 
 
@@ -281,7 +282,7 @@ impl App {
                 let current_time = std::time::Instant::now();
                 if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.05) {
                     self.last_time = current_time;
-                    self.cpu.clock(&mut self.addr_bus,  &mut self.data_bus, &mut self.addr_rw);
+                    self.nes.clock();
                 }
             },
             WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
@@ -290,16 +291,15 @@ impl App {
                 }
             },
             WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
-                let cpu = &mut self.cpu;
                 if event.repeat { return; }
                 if event.state != ElementState::Pressed { return; }
                 match event.key_without_modifiers().as_ref() {
                     Key::Character(s) => {
                         match s {
-                            "r" => { cpu.reset(); },
-                            "i" => { cpu.irq(); },
-                            "n" => { cpu.nmi(); },
-                            "p" => if !self.clock_cpu { cpu.clock(&mut self.addr_bus,  &mut self.data_bus, &mut self.addr_rw); },
+                            "r" => { self.nes.cpu.reset(); },
+                            "i" => { self.nes.cpu.irq(); },
+                            "n" => { self.nes.cpu.nmi(); },
+                            "p" => if !self.clock_cpu { self.nes.clock(); },
                             _ => {}
                         }
                     }
@@ -328,8 +328,8 @@ struct NESBoard {
 }
 
 impl NESBoard {
-    fn new(ram: Vec<u8>) -> NESBoard {
-        NESBoard { ram, cpu: Cpu::new(), addr_rw: true, addr_bus: 0, data_bus: 0 }
+    fn new(cpu: Cpu, ram: Vec<u8>) -> NESBoard {
+        NESBoard { ram, cpu, addr_rw: true, addr_bus: 0, data_bus: 0 }
     }
 
     // Emulate one master clok cycle
@@ -350,7 +350,6 @@ impl NESBoard {
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
 
-    let mut bus: Bus = Bus::new();
     let mut cpu = Cpu::new();
 
     //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
@@ -392,15 +391,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     cpu.pc = 0xC001;
     let a = ram[0xC000];
     cpu.opcode = a;
-    let instruction = cpu.lookup[a as usize];
+    let instruction = lookup::LOOKUP_TABLE[a as usize];
     cpu.cpu_log.start_address = 0xC000;
     cpu.cpu_log.opcode = instruction.op();
     cpu.cpu_log.addrmode = instruction.addrmode();
     cpu.cpu_log.start_cycle = 7;
+    cpu.cycles = 7;
+    cpu.stkpt = 0xFD;
+    cpu.set_flags(Flags6502::I | Flags6502::U);
 
     let mut app = App::new(cpu, ram);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
+
+    thread_local! {}
 
     Ok(())
 }

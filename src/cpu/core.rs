@@ -2,8 +2,7 @@ use bitflags::bitflags;
 use std::fmt;
 
 use crate::cpu::instructions::stringify_ins_from_log;
-
-use super::instructions::{create_lookup_table, Instruction};
+use super::instructions::lookup;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -226,11 +225,10 @@ pub struct Cpu {
     pub addr_data: u16,
 
     pub opcode: u8,
-    cycles: usize,
+    pub cycles: usize,
 
     pub cpu_log: CpuLog,
 
-    pub lookup: [Instruction; 256],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -247,7 +245,7 @@ pub enum PipelineStatus {
     Exec3,
     Exec4,
     Exec5,
-    Store,
+    IR,
 }
 
 impl PipelineStatus {
@@ -264,8 +262,8 @@ impl PipelineStatus {
             Self::Exec2 => Self::Exec3,
             Self::Exec3 => Self::Exec4,
             Self::Exec4 => Self::Exec5,
-            Self::Exec5 => Self::Store,
-            Self::Store => Self::Addr0,
+            Self::Exec5 => Self::IR,
+            Self::IR => Self::Addr0,
         }
     }
 }
@@ -303,7 +301,6 @@ impl Cpu {
             opcode: 0,
             cycles: 0,
             cpu_log: CpuLog::default(),
-            lookup: create_lookup_table(),
         }
     }
 
@@ -356,14 +353,49 @@ impl Cpu {
     // Perform one instruction worth of emulation
     pub fn clock(&mut self, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         // println!("Clock: {:?}", self.pipeline_status);
-        let instruction = self.lookup[self.opcode as usize];
-        let instruction_finished = self.execute(instruction.op(), instruction.addrmode(), address_bus, data_bus, address_rw, phi);
-        self.cycles = self.cycles.wrapping_add(1);
-        if instruction_finished && !phi {
+        self.cycles = self.cycles.wrapping_add(phi as usize);
+        let instruction = lookup::LOOKUP_TABLE[self.opcode as usize];
+        
+        self.execute(instruction.op(), instruction.addrmode(), address_bus, data_bus, address_rw, phi)
+    }
+
+    fn execute(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+
+        let mut is_executing_stage = matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5);
+        let mut is_ir_stage = matches!(self.pipeline_status, PipelineStatus::IR);
+        let is_addr_stage = !is_executing_stage && !is_ir_stage;
+
+        if is_addr_stage {
+            let finished_addressing = self.execute_addrmode(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+            if finished_addressing {
+                self.pipeline_status = PipelineStatus::Exec0;
+                is_executing_stage = !phi;
+            } else {
+                if !self.page_boundary_crossed && phi {
+                    self.pipeline_status.advance(); 
+                }
+                return false;
+            }
+        }
+
+        if is_executing_stage {
+            let finished_executing = self.execute_instruction(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+            if finished_executing {
+                self.pipeline_status = PipelineStatus::IR;
+                is_ir_stage = !phi;
+            } else if phi {
+                self.pipeline_status.advance();
+                return false;
+            }
+        }
+
+        if is_ir_stage && !phi {
             *address_bus = self.pc;
             *address_rw = true;
+            return false;
         }
-        if instruction_finished && phi {
+
+        if is_ir_stage && phi {
             self.print_log();
 
             self.opcode = *data_bus;
@@ -372,25 +404,15 @@ impl Cpu {
 
             self.log_byte0(self.opcode);
             
-            let instruction = self.lookup[self.opcode as usize];
+            let instruction = lookup::LOOKUP_TABLE[self.opcode as usize];
             self.cpu_log.opcode = instruction.op();
             self.cpu_log.addrmode = instruction.addrmode();
             self.cpu_log.start_cycle = self.cycles;
+            self.pipeline_status = PipelineStatus::Addr0;
+            return true;
         }
-        instruction_finished
-    }
 
-    fn execute(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
-
-        if !matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Store) {
-            let finished_addressing = self.execute_addrmode(opcode, addrmode, address_bus, data_bus, address_rw, phi);
-            if !finished_addressing { if !self.page_boundary_crossed { self.pipeline_status.advance(); } return false; }
-            else { self.pipeline_status = PipelineStatus::Exec0; }
-        }
-        let finished_executing = self.execute_instruction(opcode, addrmode, address_bus, data_bus, address_rw, phi);
-        if !finished_executing { self.pipeline_status.advance(); }
-        else { self.pipeline_status = PipelineStatus::Addr0; }
-        finished_executing
+        false
     }
 
     /// Returns true if the instruction should immediately begin executing
@@ -400,6 +422,9 @@ impl Cpu {
         use InstructionAddressingModes as Addr;
         use InstructionOperations as InsOp;
         let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
+        let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY);
+        
+        let skip_read = is_mw;
 
         // Page boundary incurrs a +1 cycle cost
         if self.page_boundary_crossed {
@@ -419,35 +444,43 @@ impl Cpu {
         match (addrmode, self.pipeline_status, phi) {
             (Addr::IMP, PipelineStatus::Addr0, false) => { false },
             (Addr::IMP, PipelineStatus::Addr0, true ) => { true },
+
             (Addr::ACC, PipelineStatus::Addr0, false) => { self.fetched = self.a; false },
             (Addr::ACC, PipelineStatus::Addr0, true ) => { true },
-            (_, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
-            (_, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
 
+
+            (Addr::IMM | Addr::REL, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
+            (Addr::IMM | Addr::REL, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
             (Addr::IMM | Addr::REL, PipelineStatus::Addr1, false) => { true }, // Rel offset is stored in both fetched and addr_data
             (Addr::IMM | Addr::REL, PipelineStatus::Addr1, true ) => { true }, // shouldn't be reached but nonetheless
 
+            (Addr::ZP0, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
+            (Addr::ZP0, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; skip_read }
             (Addr::ZP0, PipelineStatus::Addr1, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ZP0, PipelineStatus::Addr1, true ) => { self.fetched = *data_bus; true },
             (Addr::ZP0, PipelineStatus::Addr2, false) => { true },
             (Addr::ZP0, PipelineStatus::Addr2, true ) => { true }, // shouldn't be reached but nonetheless
 
+            // This functionality is common to all instructions with >1 bytes of opcode
+            (_, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
+            (_, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
+
             (Addr::ZPX, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
-            (Addr::ZPX, PipelineStatus::Addr1, true ) => { false }, // should dummy-read maybe
+            (Addr::ZPX, PipelineStatus::Addr1, true ) => { !skip_read }, // should dummy-read maybe
             (Addr::ZPX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ZPX, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
             (Addr::ZPX, PipelineStatus::Addr3, false) => { true },
             (Addr::ZPX, PipelineStatus::Addr3, true ) => { true }, // shouldn't be reached but nonetheless
 
             (Addr::ZPY, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
-            (Addr::ZPY, PipelineStatus::Addr1, true ) => { false }, // should dummy-read maybe
+            (Addr::ZPY, PipelineStatus::Addr1, true ) => { !skip_read }, // should dummy-read maybe
             (Addr::ZPY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ZPY, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
             (Addr::ZPY, PipelineStatus::Addr3, false) => { true },
             (Addr::ZPY, PipelineStatus::Addr3, true ) => { true }, // shouldn't be reached but nonetheless
 
             (Addr::ABS, PipelineStatus::Addr1, false) => { *address_bus = self.pc; *address_rw = true; self.pc += 1; false }
-            (Addr::ABS, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABS, PipelineStatus::Addr1, true) => { self.log_byte2(*data_bus); set_hi_byte(&mut self.addr_data, *data_bus); skip_read }
             (Addr::ABS, PipelineStatus::Addr2, false) => { 
                 if opcode == InstructionOperations::JMP {
                     self.pc = self.addr_data;
@@ -465,9 +498,6 @@ impl Cpu {
                 let old_lo_byte = lo_byte(self.addr_data);
                 let new_lo_byte = old_lo_byte.wrapping_add(offset);
                 set_lo_byte(&mut self.addr_data, new_lo_byte);
-
-                // page-boundary crossed if we wrapped around and
-                // addition creates a lower value than we started with
                 self.page_boundary_crossed = new_lo_byte < old_lo_byte;
 
                 *address_bus = self.pc;
@@ -476,7 +506,7 @@ impl Cpu {
 
                 false
             },
-            (Addr::ABX, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABX, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); skip_read }
             (Addr::ABX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ABX, PipelineStatus::Addr2, true) => { self.fetched = *data_bus; false }
             (Addr::ABX, PipelineStatus::Addr3, false) => { !is_rwm } // if this is DEC, this cycle is dedicated to fixing page boundary
@@ -486,9 +516,6 @@ impl Cpu {
                 let old_lo_byte = lo_byte(self.addr_data);
                 let new_lo_byte = old_lo_byte.wrapping_add(offset);
                 set_lo_byte(&mut self.addr_data, new_lo_byte);
-
-                // page-boundary crossed if we wrapped around and
-                // addition creates a lower value than we started with
                 self.page_boundary_crossed = new_lo_byte < old_lo_byte;
 
                 *address_bus = self.pc;
@@ -497,7 +524,7 @@ impl Cpu {
 
                 false
             },
-            (Addr::ABY, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); false }
+            (Addr::ABY, PipelineStatus::Addr1, true) => { let b = *data_bus; self.log_byte2(b); set_hi_byte(&mut self.addr_data, b); skip_read }
             (Addr::ABY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ABY, PipelineStatus::Addr2, true) => { self.fetched = *data_bus; false }
             (Addr::ABY, PipelineStatus::Addr3, false) => { true },
@@ -518,49 +545,55 @@ impl Cpu {
             (Addr::IND, PipelineStatus::Addr3, true) => { let b = *data_bus; set_hi_byte(&mut self.pc, b); false },
 
             (Addr::IDX, PipelineStatus::Addr1, false) => {
-                self.fetched = lo_byte(self.addr_data).wrapping_add(self.x);
+                self.fetched = lo_byte(self.addr_data).wrapping_add(self.x); // TODO: this might be set after writing to addr
                 *address_bus = self.fetched as u16;
                 *address_rw = true;
                 false
             },
             (Addr::IDX, PipelineStatus::Addr1, true) => {
-                let b = *data_bus;
-                set_lo_byte(&mut self.addr_data, b);
+                _ = *data_bus; // dummy read
                 false
             }
-
             (Addr::IDX, PipelineStatus::Addr2, false) => {
+                *address_bus = self.fetched as u16;
+                *address_rw = true;
+                false
+            },
+            (Addr::IDX, PipelineStatus::Addr2, true) => {
+                set_lo_byte(&mut self.addr_data, *data_bus);
+                false
+            }
+            (Addr::IDX, PipelineStatus::Addr3, false) => {
                 self.fetched = self.fetched.wrapping_add(1);
                 *address_bus = self.fetched as u16;
                 *address_rw = true;
                 false
             },
-            (Addr::IDX, PipelineStatus::Addr2, true) => { let b = *data_bus; set_hi_byte(&mut self.addr_data, b); false },
-            (Addr::IDX, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false },
-            (Addr::IDX, PipelineStatus::Addr3, true) => { self.fetched = *data_bus; false },
+            (Addr::IDX, PipelineStatus::Addr3, true) => { set_hi_byte(&mut self.addr_data, *data_bus); skip_read },
+            (Addr::IDX, PipelineStatus::Addr4, false) => { *address_bus = self.addr_data; *address_rw = true; false },
+            (Addr::IDX, PipelineStatus::Addr4, true) => { self.fetched = *data_bus; false },
 
-            (Addr::IDY, PipelineStatus::Addr2, false) => {
-                let zpAddr = lo_byte(self.addr_data) as u16; // grab zp address before we replace it
-                let old_lo_byte = self.fetched;
-                let new_lo_byte = self.fetched.wrapping_add(self.y);
-                set_lo_byte(&mut self.addr_data, new_lo_byte);
-                self.page_boundary_crossed = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and 
-                                                                        // addition creates a lower value than we started with
-                *address_bus = zpAddr;
-                *address_rw = true;
-                false
-            }
-            (Addr::IDY, PipelineStatus::Addr2, true) => { let b = *data_bus; set_hi_byte(&mut self.addr_data, b); false }
             (Addr::IDY, PipelineStatus::Addr1, false) => {
                 *address_bus = self.addr_data;
                 *address_rw = true;
-                self.addr_data = self.addr_data.wrapping_add(1); // store next zp address in addr_data
+                self.addr_data = self.addr_data.wrapping_add(1); // TODO: Check if this needs to wrap on ZP
                 false
             }
             (Addr::IDY, PipelineStatus::Addr1, true) => {
                 self.fetched = *data_bus; // put lo byte in fetched
                 false
             }
+            (Addr::IDY, PipelineStatus::Addr2, false) => {
+                *address_bus = lo_byte(self.addr_data) as u16; // grab zp address before we replace it
+                *address_rw = true;
+                let old_lo_byte = self.fetched;
+                let new_lo_byte = self.fetched.wrapping_add(self.y);
+                set_lo_byte(&mut self.addr_data, new_lo_byte);
+                self.page_boundary_crossed = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and 
+                                                                        // addition creates a lower value than we started with
+                false
+            }
+            (Addr::IDY, PipelineStatus::Addr2, true) => { set_hi_byte(&mut self.addr_data, *data_bus); skip_read }
             (Addr::IDY, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::IDY, PipelineStatus::Addr3, true) => { self.fetched = *data_bus; false }
 
@@ -577,12 +610,12 @@ impl Cpu {
     fn execute_instruction(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionOperations as InsOp;
         use PipelineStatus as PS;
-        match (opcode, self.pipeline_status) {
-            (InsOp::NOP, _) => {
+        match (opcode, self.pipeline_status, phi) {
+            (InsOp::NOP, _, _) => {
                 true
-            }
+            },
             // Add with carry
-            (InsOp::ADC, PS::Exec0) => {
+            (InsOp::ADC, PS::Exec0, false) => {
                 let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
 
                 self.check_nzc_flags(temp);
@@ -594,14 +627,16 @@ impl Cpu {
                 self.a = (temp & 0x00FF) as u8;
                 true
             }
+            (InsOp::ADC, PS::Exec0, true ) => { true } // possible unneeded
             // Logical And (&)
-            (InsOp::AND, PS::Exec0) => {
+            (InsOp::AND, PS::Exec0, false) => {
                 self.a &= self.fetched;
                 self.check_nz_flags(self.a);
                 true
             }
+            (InsOp::AND, PS::Exec0, true ) => { true } // possible unneeded
             // Arithmatic Shift Left ( A|M << 1 OR A|M * 2)
-            (InsOp::ASL, PS::Exec0) => {
+            (InsOp::ASL, PS::Exec0, false) => {
                 let temp = self.fetched << 1;
                 self.check_nz_flags(temp);
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
@@ -614,47 +649,45 @@ impl Cpu {
                     false
                 }
             },
-            (InsOp::ASL, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                false
-            },
-            (InsOp::ASL, PS::Exec2) => {
-                true
-            }
+            (InsOp::ASL, PS::Exec0, true) => { false }
+            (InsOp::ASL, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false },
+            (InsOp::ASL, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::ASL, PS::Exec2, _) => { true }
 
             // Branch if Carry Clear
-            (InsOp::BCC, PS::Exec0) => {
+            (InsOp::BCC, PS::Exec0, false) => {
                 self.branch(!self.get_flag(Flags6502::C))
             }
             // Branch is Carry Set
-            (InsOp::BCS, PS::Exec0) => {
+            (InsOp::BCS, PS::Exec0, false) => {
                 self.branch(self.get_flag(Flags6502::C))
             }
             // Branch if Equal (Branch if Zero Set)
-            (InsOp::BEQ, PS::Exec0) => {
+            (InsOp::BEQ, PS::Exec0, false) => {
                 self.branch(self.get_flag(Flags6502::Z))
             }
             // Branch if Minus (Branch if Negative Flag Set)
-            (InsOp::BMI, PS::Exec0) => {
+            (InsOp::BMI, PS::Exec0, false) => {
                 self.branch(self.get_flag(Flags6502::N))
             }
             // Branch if Not Equal (Branch if Zero Clear)
-            (InsOp::BNE, PS::Exec0) => {
+            (InsOp::BNE, PS::Exec0, false) => {
                 self.branch(!self.get_flag(Flags6502::Z))
             }
             // Branch is Positive (Branch if Negative Clear)
-            (InsOp::BPL, PS::Exec0) => {
+            (InsOp::BPL, PS::Exec0, false) => {
                 self.branch(!self.get_flag(Flags6502::N))
             }
             // Branch if Overflow Clear
-            (InsOp::BVC, PS::Exec0) => {
+            (InsOp::BVC, PS::Exec0, false) => {
                 self.branch(!self.get_flag(Flags6502::V))
             }
             // Branch if Overflow Set
-            (InsOp::BVS, PS::Exec0) => {
+            (InsOp::BVS, PS::Exec0, false) => {
                 self.branch(self.get_flag(Flags6502::V))
             }
-            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1) => {
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec0, true) => { false }
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, false) => {
                 // const sign_extended: u16 = b as i8 as i16 as u16;
                 // const high_offset: u8 = (sign_extended >> 8) as u8;
                 let sign_extended = hi_byte(self.fetched as i8 as i16 as u16);
@@ -671,152 +704,99 @@ impl Cpu {
                     true
                 }
             }
-            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec2) => {
-                true
-            }
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, true) => { false }
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec2, _) => { true }
             // Bit Test
-            (InsOp::BIT, PS::Exec0) => {
+            (InsOp::BIT, PS::Exec0, false) => {
                 let temp = self.a & self.fetched;
                 self.check_z_flag(temp);
                 self.set_flag(Flags6502::N, (self.fetched & (1 << 7)) > 0);
                 self.set_flag(Flags6502::V, (self.fetched & (1 << 6)) > 0);
                 true
-            }
+            },
+            (InsOp::BIT, PS::Exec0, true) => { true },
             // BRK - Force Inturrupt
-            (InsOp::BRK, PS::Exec0) => {
-                let pc_hi_bits = hi_byte(self.pc);
-                self.write(0x0100 + (self.stkpt as u16), pc_hi_bits);
-                self.stkpt = self.stkpt.wrapping_sub(1);
-
-                false
-            },
-            (InsOp::BRK, PS::Exec1) => {
-                let pc_low_bits = lo_byte(self.pc);
-                self.write(0x0100 + self.stkpt as u16, pc_low_bits);
+            (InsOp::BRK, PS::Exec0, false) => {
+                self.fetched = hi_byte(self.pc);
+                *address_bus = 0x0100 + (self.stkpt as u16);
+                *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
-            (InsOp::BRK, PS::Exec2) => {
-                let p_s = (self.status | Flags6502::B | Flags6502::U).bits();
-                self.write(0x0100 + self.stkpt as u16, p_s );
+            (InsOp::BRK, PS::Exec0, true) => { *data_bus = self.fetched; false }
+            (InsOp::BRK, PS::Exec1, false) => {
+                self.fetched = lo_byte(self.pc);
+                *address_bus = 0x0100 + (self.stkpt as u16);
+                *address_rw = false;
+                self.stkpt = self.stkpt.wrapping_sub(1);
+                false
+            },
+            (InsOp::BRK, PS::Exec1, true) => { *data_bus = self.fetched; false}
+            (InsOp::BRK, PS::Exec2, false) => {
+                self.fetched = (self.status | Flags6502::B | Flags6502::U).bits();
+                *address_bus = 0x0100 + (self.stkpt as u16);
+                *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 self.set_flag(Flags6502::I, true);
                 false
             },
-            (InsOp::BRK, PS::Exec3) => {
-                // write pc low
-                let b = self.read_byte(0xFFFE);
-                set_lo_byte(&mut self.pc, b);
-                false
-            },
-            (InsOp::BRK, PS::Exec4) => {
-                // write pc high
-                let b = self.read_byte(0xFFFF);
-                set_hi_byte(&mut self.pc, b);
-                false
-            },
-            (InsOp::BRK, PS::Exec5) => {
-                true
-            },
+            (InsOp::BRK, PS::Exec2, true) => { *data_bus = self.fetched; false }
+            (InsOp::BRK, PS::Exec3, false) => { *address_bus = 0xFFFE; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec3, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
+            (InsOp::BRK, PS::Exec4, false) => { *address_bus = 0xFFFF; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec4, true) => { set_hi_byte(&mut self.pc, *data_bus); false },
+            (InsOp::BRK, PS::Exec5, _) => { true },
             // Clear Carry Flag
-            (InsOp::CLC, PS::Exec0) => {
-                self.set_flag(Flags6502::C, false);
-                true
-            }
+            (InsOp::CLC, PS::Exec0, _) => { self.set_flag(Flags6502::C, false); true }
             // Clear Decimal Mode
-            (InsOp::CLD, PS::Exec0) => {
-                self.set_flag(Flags6502::D, false);
-                true
-            }
+            (InsOp::CLD, PS::Exec0, _) => { self.set_flag(Flags6502::D, false); true }
             // Clear Inturrupt Disable
-            (InsOp::CLI, PS::Exec0) => {
-                self.set_flag(Flags6502::I, false);
-                true
-            }
+            (InsOp::CLI, PS::Exec0, _) => { self.set_flag(Flags6502::I, false); true }
             // Clear Overflow Flag
-            (InsOp::CLV, PS::Exec0) => {
-                self.set_flag(Flags6502::V, false);
-                true
-            }
+            (InsOp::CLV, PS::Exec0, _) => { self.set_flag(Flags6502::V, false); true }
             // Compare
-            (InsOp::CMP, PS::Exec0) => {
-                self.compare(self.a, self.fetched);
-                true
-            }
+            (InsOp::CMP, PS::Exec0, _) => { self.compare(self.a, self.fetched); true }
             // Compare X Register
-            (InsOp::CPX, PS::Exec0) => {
-                self.compare(self.x, self.fetched);
-                true
-            }
+            (InsOp::CPX, PS::Exec0, _) => { self.compare(self.x, self.fetched); true }
             // Compare Y Register
-            (InsOp::CPY, PS::Exec0) => {
-                self.compare(self.y, self.fetched);
-                true
-            }
+            (InsOp::CPY, PS::Exec0, _) => { self.compare(self.y, self.fetched); true }
             // Decrement value at address
-            (InsOp::DEC, PS::Exec0) => {
-                let temp = self.decrement(self.fetched);
-                self.check_nz_flags(temp);
-                self.fetched = temp;
+            (InsOp::DEC, PS::Exec0, false) => {
+                self.fetched = self.decrement(self.fetched);
                 false
             },
-            (InsOp::DEC, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                false
-            },
-            (InsOp::DEC, PS::Exec2) => {
-                true
-            }
+            (InsOp::DEC, PS::Exec0, true) => { false },
+            (InsOp::DEC, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false },
+            (InsOp::DEC, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::DEC, PS::Exec2, _) => { true }
             // Decrement X register
-            (InsOp::DEX, PS::Exec0) => {
-                self.x = self.decrement(self.x);
-                self.check_nz_flags(self.x);
-                true
-            }
+            (InsOp::DEX, PS::Exec0, false) => { self.x = self.decrement(self.x); true }
+            (InsOp::DEX, PS::Exec0, true) => { true } // possibly unneeded
 
             // Decrement Y register
-            (InsOp::DEY, PS::Exec0) => {
-                self.y = self.decrement(self.y);
-                self.check_nz_flags(self.y);
-                true
-            }
+            (InsOp::DEY, PS::Exec0, false) => { self.y = self.decrement(self.y); true }
+            (InsOp::DEY, PS::Exec0, true) => { true } // possibly unneeded
             // Exclusive OR
-            (InsOp::EOR, PS::Exec0) => {
+            (InsOp::EOR, PS::Exec0, false) => {
                 self.a = self.a ^ self.fetched;
                 self.check_nz_flags(self.a);
                 true
             }
+            (InsOp::EOR, PS::Exec0, true) => { true } // possibly unneeded
             // Increment memory at address
-            (InsOp::INC, PS::Exec0) => {
-                let temp = self.increment(self.fetched);
-                self.check_nz_flags(temp);
-                if addrmode == InstructionAddressingModes::ACC{ self.a = temp; true }
-                else { self.fetched = temp; false }
-            },
-            (InsOp::INC, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                false
-            }
-            (InsOp::INC, PS::Exec2) => {
-                true
-            }
+            (InsOp::INC, PS::Exec0, false) => { self.fetched = self.increment(self.fetched); false },
+            (InsOp::INC, PS::Exec0, true) => { false },
+            (InsOp::INC, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::INC, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::INC, PS::Exec2, _) => { true }
             // Increment X register
-            (InsOp::INX, PS::Exec0) => {
-                self.x = self.increment(self.x);
-                self.check_nz_flags(self.x);
-                true
-            }
+            (InsOp::INX, PS::Exec0, false) => { self.x = self.increment(self.x); true }
+            (InsOp::INX, PS::Exec0, true) => { true } // possibly unneeded
             // Increment Y register
-            (InsOp::INY, PS::Exec0) => {
-                self.y = self.increment(self.y);
-                self.check_nz_flags(self.y);
-                true
-            }
+            (InsOp::INY, PS::Exec0, false) => { self.y = self.increment(self.y); true }
+            (InsOp::INY, PS::Exec0, true) => { true } // possibly unneeded
             // Jump to address
-            (InsOp::JMP, PS::Exec0) => {
-                //self.pc = self.addr_data; // already taken care of in addrmode execution
-                true
-            }
+            (InsOp::JMP, PS::Exec0, _) => { true } //self.pc = self.addr_data; // already taken care of in addrmode execution
             // Jump to subroutine
             // ~~TODO: Check cycle correctness~~
             // INFO: JSR is apparently done very weirdly:
@@ -828,46 +808,56 @@ impl Cpu {
             // 6. Read next instruction
             // I read the new pc, push the old pc,
             // then set pc to the new pc
-            (InsOp::JSR, PS::Exec0) => {
+            (InsOp::JSR, PS::Exec0, false) => {
                 self.pc -= 1;
-
-                self.write(
-                    0x0100 + self.stkpt as u16,
-                    hi_byte(self.pc),
-                );
+                *address_bus = 0x0100 + self.stkpt as u16;
+                *address_rw = false;
+                self.fetched = hi_byte(self.pc);
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
-            (InsOp::JSR, PS::Exec1) => {
-                self.write(0x0100 + self.stkpt as u16, lo_byte(self.pc));
+            (InsOp::JSR, PS::Exec0, true) => {
+                *data_bus = self.fetched;
+                false 
+            }
+            (InsOp::JSR, PS::Exec1, false) => {
+                *address_bus = 0x0100 + self.stkpt as u16;
+                *address_rw = false;
+                self.fetched = lo_byte(self.pc);
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 self.pc = self.addr_data;
                 false
             }
-            (InsOp::JSR, PS::Exec2) => {
-                true
+            (InsOp::JSR, PS::Exec1, true) => {
+                *data_bus = self.fetched;
+                false
             }
+            (InsOp::JSR, PS::Exec2, _) => { true }
 
             // Load Accumulator
-            (InsOp::LDA, PS::Exec0) => {
+            (InsOp::LDA, PS::Exec0, false) => {
                 self.a = self.fetched;
                 self.check_nz_flags(self.a);
                 true
             }
+            (InsOp::LDA, PS::Exec0, true) => { true } // possibly unneeded
+
             // Load X register
-            (InsOp::LDX, PS::Exec0) => {
+            (InsOp::LDX, PS::Exec0, false) => {
                 self.x = self.fetched;
                 self.check_nz_flags(self.x);
                 true
             }
+            (InsOp::LDX, PS::Exec0, true) => { true } // possibly unneeded
             // Load Y register
-            (InsOp::LDY, PS::Exec0) => {
+            (InsOp::LDY, PS::Exec0, false) => {
                 self.y = self.fetched;
                 self.check_nz_flags(self.y);
                 true
             }
+            (InsOp::LDY, PS::Exec0, true) => { true } // possibly unneeded
             // Logical Shift Right
-            (InsOp::LSR, PS::Exec0) => {
+            (InsOp::LSR, PS::Exec0, false) => {
                 self.set_flag(Flags6502::C, self.fetched & 0x0001 > 0);
                 let temp = self.fetched >> 1;
                 self.check_nz_flags(temp);
@@ -880,48 +870,54 @@ impl Cpu {
                     false
                 }
             },
-            (InsOp::LSR, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                true
-            }
+            (InsOp::LSR, PS::Exec0, true) => { false }
+            (InsOp::LSR, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::LSR, PS::Exec1, true) => { *data_bus = self.fetched; true }
 
             // Logical Inclusive OR
-            (InsOp::ORA, PS::Exec0) => {
+            (InsOp::ORA, PS::Exec0, false) => {
                 self.a = self.a | self.fetched;
                 self.check_nz_flags(self.a);
                 true
             }
+            (InsOp::ORA, PS::Exec0, true) => { true } // possibly unneeded
             // Push Accumulator (to stack)
-            (InsOp::PHA, PS::Exec0) => {
-                self.write(0x0100 + self.stkpt as u16, self.a);
+            (InsOp::PHA, PS::Exec0, false) => {
+                *address_bus = 0x0100 + self.stkpt as u16;
+                *address_rw = false;
+                self.fetched = self.a;
                 self.stkpt = self.stkpt.wrapping_sub(1);
-                true
+                false
             }
+            (InsOp::PHA, PS::Exec0, true) => { *data_bus = self.fetched; true }
             // Push Processor Stack
-            (InsOp::PHP, PS::Exec0) => {
+            (InsOp::PHP, PS::Exec0, false) => {
+                *address_bus = 0x0100 + self.stkpt as u16;
+                *address_rw = false;
                 // B and U are pushed as set
-                self.write(0x0100 + self.stkpt as u16, (self.get_status() | Flags6502::B | Flags6502::U).bits()); 
+                self.fetched = (self.get_status() | Flags6502::B | Flags6502::U).bits(); 
                 self.stkpt = self.stkpt.wrapping_sub(1);
-                true
+                false
             }
+            (InsOp::PHP, PS::Exec0, true) => { *data_bus = self.fetched; true }
             // Pull Accumulator
-            (InsOp::PLA, PS::Exec0) => {
-                self.stkpt = self.stkpt.wrapping_add(1);
-                self.a = self.read_byte(0x0100 + self.stkpt as u16);
-                self.check_nz_flags(self.a);
-                true
-            }
+            (InsOp::PLA, PS::Exec0, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::PLA, PS::Exec0, true) => { _ = *data_bus; self.check_nz_flags(self.a); self.stkpt = self.stkpt.wrapping_add(1); false }
+            (InsOp::PLA, PS::Exec1, false) => {  *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::PLA, PS::Exec1, true) => { self.a = *data_bus; self.check_nz_flags(self.a); true }
             // Pull Processor Stack
-            (InsOp::PLP, PS::Exec0) => {
-                self.stkpt = self.stkpt.wrapping_add(1);
+            (InsOp::PLP, PS::Exec0, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::PLP, PS::Exec0, true) => { _ = *data_bus; self.check_nz_flags(self.a); self.stkpt = self.stkpt.wrapping_add(1); false }
+            (InsOp::PLP, PS::Exec1, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::PLP, PS::Exec1, true) => {
                 self.status = Flags6502::from_bits_retain(
-                        self.read_byte(0x0100 + self.stkpt as u16) & 0b11001111
-                        | self.status.bits() & 0b00110000
+                    *data_bus & 0b11001111
+                    | self.status.bits() & 0b00110000
                 );
                 true
             }
             // Rotate Left
-            (InsOp::ROL, PS::Exec0) => {
+            (InsOp::ROL, PS::Exec0, false) => {
                 let temp = ((self.fetched) << 1) | self.get_flag(Flags6502::C) as u8;
                 self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
                 self.check_nz_flags(temp);
@@ -933,15 +929,12 @@ impl Cpu {
                     false
                 }
             }
-            (InsOp::ROL, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                false
-            }
-            (InsOp::ROL, PS::Exec2) => {
-                true
-            }
+            (InsOp::ROL, PS::Exec0, true) => { false }
+            (InsOp::ROL, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::ROL, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::ROL, PS::Exec2, _) => { true }
             // Rotate Right
-            (InsOp::ROR, PS::Exec0) => {
+            (InsOp::ROR, PS::Exec0, false) => {
                 let temp = ((self.get_flag(Flags6502::C) as u8) << 7) | self.fetched >> 1;
                 self.set_flag(Flags6502::C, self.fetched & 0x01 > 0);
                 self.check_nz_flags(temp);
@@ -954,66 +947,38 @@ impl Cpu {
                     false
                 }
             }
-            (InsOp::ROR, PS::Exec1) => {
-                self.write(self.addr_data, self.fetched);
-                false
-            }
-            (InsOp::ROR, PS::Exec2) => {
-                true
-            }
+            (InsOp::ROR, PS::Exec0, true) => { false }
+            (InsOp::ROR, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::ROR, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::ROR, PS::Exec2, _) => { true }
             // Return from Inturrupt
-            (InsOp::RTI, PS::Exec0) => {
-                self.stkpt = self.stkpt.wrapping_add(1);
-                let _ = self.read_byte(0x0100 + self.stkpt as u16); // dummy read
-                false
-            },
-            (InsOp::RTI,PS::Exec1) => {
-                let b = self.read_byte(0x0100 + self.stkpt as u16);
-                let b = (b & 0b11001111) | (self.status.bits() & 0b00110000);
-                self.stkpt = self.stkpt.wrapping_add(1);
+            (InsOp::RTI, PS::Exec0, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; self.stkpt = self.stkpt.wrapping_add(1); false },
+            (InsOp::RTI, PS::Exec0, true) => { self.fetched = *data_bus; false } // dummy read
+            (InsOp::RTI, PS::Exec1, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; self.stkpt = self.stkpt.wrapping_add(1); false },
+            (InsOp::RTI, PS::Exec1, true) => {
+                let b = (*data_bus & 0b11001111) | (self.status.bits() & 0b00110000);
                 self.status = Flags6502::from_bits_retain(b);
-                // self.status &= !Flags6502::B;
-                // self.status &= !Flags6502::U;
                 false
             }
-            (InsOp::RTI, PS::Exec2) => {
-                let b = self.read_byte(0x0100 + self.stkpt as u16);
-                self.stkpt = self.stkpt.wrapping_add(1);
-                set_lo_byte(&mut self.pc, b);
-                false
-            },
-            (InsOp::RTI, PS::Exec3) => {
-                let b = self.read_byte(0x0100 + self.stkpt as u16);
-                set_hi_byte(&mut self.pc, b);
-                false
-            }
-            (InsOp::RTI, PS::Exec4) => {
-                true
-            }
+            (InsOp::RTI, PS::Exec2, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; self.stkpt = self.stkpt.wrapping_add(1); false },
+            (InsOp::RTI, PS::Exec2, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
+            (InsOp::RTI, PS::Exec3, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::RTI, PS::Exec3, true) => { set_hi_byte(&mut self.pc, *data_bus); false }
+            (InsOp::RTI, PS::Exec4, _) => { true }
             // Return from subroutine
-            (InsOp::RTS, PS::Exec0) => {
-                self.stkpt = self.stkpt.wrapping_add(1);
-                let _ = self.read_byte(0x0100 + self.stkpt as u16); // dummy read
-                false
-            },
-            (InsOp::RTS, PS::Exec1) => {
-                let b = self.read_byte(0x0100 + self.stkpt as u16);
-                self.stkpt = self.stkpt.wrapping_add(1);
-                set_lo_byte(&mut self.pc, b);
-                false
-            },
-            (InsOp::RTS, PS::Exec2) => {
-                let b = self.read_byte(0x0100 + self.stkpt as u16);
-                set_hi_byte(&mut self.pc, b);
-                false
-            }
-            (InsOp::RTS, PS::Exec3) => {
-                true
-            }
+            (InsOp::RTS, PS::Exec0, false) => { self.stkpt = self.stkpt.wrapping_add(1); *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false },
+            (InsOp::RTS, PS::Exec0, true) => { let _ = *data_bus; false } // dummy read
+            (InsOp::RTS, PS::Exec1, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; self.stkpt = self.stkpt.wrapping_add(1); false },
+            (InsOp::RTS, PS::Exec1, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
+            (InsOp::RTS, PS::Exec2, false) => { *address_bus = 0x0100 + self.stkpt as u16; *address_rw = true; false }
+            (InsOp::RTS, PS::Exec2, true) => { set_hi_byte(&mut self.pc, *data_bus); false }
+            (InsOp::RTS, PS::Exec3, false) => { *address_bus = self.pc; *address_rw = true; false }
+            (InsOp::RTS, PS::Exec3, true) => { _ = *data_bus; self.pc += 1; false }
+            (InsOp::RTS, PS::Exec4, _) => { true }
 
             // Subtract with carry
             // TODO: Confirm subtraction works
-            (InsOp::SBC, PS::Exec0) => {
+            (InsOp::SBC, PS::Exec0, false) => {
                 let value = (!self.fetched) as u16;
                 let temp = self.a as u16 + value + self.get_flag(Flags6502::C) as u16;
                 self.set_flag(Flags6502::C, temp & 0xFF00 > 0);
@@ -1025,80 +990,43 @@ impl Cpu {
                 self.a = lo_byte(temp);
                 true
             }
+            (InsOp::SBC, PS::Exec0, true) => { true }
             // Set carry flag
-            (InsOp::SEC, PS::Exec0) => {
-                self.set_flag(Flags6502::C, true);
-                true
-            }
+            (InsOp::SEC, PS::Exec0, _) => { self.set_flag(Flags6502::C, true); true }
             // Set decimal flag
-            (InsOp::SED, PS::Exec0) => {
-                self.set_flag(Flags6502::D, true);
-                true
-            }
+            (InsOp::SED, PS::Exec0, _) => { self.set_flag(Flags6502::D, true); true }
             // Set inturrupt disable
-            (InsOp::SEI, PS::Exec0) => {
-                self.set_flag(Flags6502::I, true);
-                true
-            }
+            (InsOp::SEI, PS::Exec0, _) => { self.set_flag(Flags6502::I, true); true }
             // Store Accumulator
-            (InsOp::STA, PS::Exec0) => {
-                self.write(self.addr_data, self.a);
-                false
-            }
-            (InsOp::STA, PS::Exec1) => {
-                true
-            }
+            (InsOp::STA, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; self.fetched = self.a; false }
+            (InsOp::STA, PS::Exec0, true) => { *data_bus = self.fetched; false }
+            (InsOp::STA, PS::Exec1, _) => { true }
             // Store X register
-            (InsOp::STX, PS::Exec0) => {
-                self.write(self.addr_data, self.x);
-                false
-            }
-            (InsOp::STX, PS::Exec1) => {
-                true
-            }
+            (InsOp::STX, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; self.fetched = self.x; false }
+            (InsOp::STX, PS::Exec0, true) => { *data_bus = self.fetched; false }
+            (InsOp::STX, PS::Exec1, _) => { true }
             // Store Y register
-            (InsOp::STY, PS::Exec0) => {
-                self.write(self.addr_data, self.y);
-                false
-            }
-            (InsOp::STY, PS::Exec1) => {
-                true
-            }
+            (InsOp::STY, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; self.fetched = self.y; false }
+            (InsOp::STY, PS::Exec0, true) => { *data_bus = self.fetched; false }
+            (InsOp::STY, PS::Exec1, _) => { true }
             // Transfer Accumulator to X
-            (InsOp::TAX, PS::Exec0) => {
-                self.x = self.a;
-                self.check_nz_flags(self.x);
-                true
-            }
+            (InsOp::TAX, PS::Exec0, false) => { self.x = self.a; self.check_nz_flags(self.x); true }
+            (InsOp::TAX, PS::Exec0, true) => {  true } // possibly unneeded
             // Transfer Accumulator to Y
-            (InsOp::TAY, PS::Exec0) => {
-                self.y = self.a;
-                self.check_nz_flags(self.y);
-                true
-            }
+            (InsOp::TAY, PS::Exec0, false) => { self.y = self.a; self.check_nz_flags(self.y); true }
+            (InsOp::TAY, PS::Exec0, true) => {  true } // possibly unneeded
             // Transfer Stack Pointer to X
-            (InsOp::TSX, PS::Exec0) => {
-                self.x = self.stkpt;
-                self.check_nz_flags(self.x);
-                true
-            }
+            (InsOp::TSX, PS::Exec0, false) => { self.x = self.stkpt; self.check_nz_flags(self.x); true }
+            (InsOp::TSX, PS::Exec0, true) => {  true } // possibly unneeded
             // Transfer Stack Pointer to A
-            (InsOp::TXA, PS::Exec0) => {
-                self.a = self.x;
-                self.check_nz_flags(self.a);
-                true
-            }
+            (InsOp::TXA, PS::Exec0, false) => { self.a = self.x; self.check_nz_flags(self.a); true }
+            (InsOp::TXA, PS::Exec0, true) => {  true } // possibly unneeded
             // Transfer X to Stack Pointer
-            (InsOp::TXS, PS::Exec0) => {
-                self.stkpt = self.x;
-                true
-            }
+            (InsOp::TXS, PS::Exec0, false) => { self.stkpt = self.x; true }
+            (InsOp::TXS, PS::Exec0, true) => {  true } // possibly unneeded
             // Transfer Y to Accumulator
-            (InsOp::TYA, PS::Exec0) => {
-                self.a = self.y;
-                self.check_nz_flags(self.a);
-                true
-            }
+            (InsOp::TYA, PS::Exec0, false) => { self.a = self.y; self.check_nz_flags(self.a); true }
+            (InsOp::TYA, PS::Exec0, true) => {  true } // possibly unneeded
             _ => { false } // Illegal Instruction
         }
     }
@@ -1268,30 +1196,8 @@ impl Cpu {
     }
 }
 
-pub struct Bus {
-    pub ram: Vec<u8>,
-}
-
-impl Bus {
-    pub fn new() -> Self {
-        const RAM_SIZE: usize = 256 * 2048;
-        let mut ram: Vec<u8> = Vec::with_capacity(RAM_SIZE);
-        ram.resize(RAM_SIZE, 0);
-        Self {
-            ram, // 65536 262160
-        }
-    }
-    pub fn write(&mut self, addr: u16, byte: u8) {
-        let addr = addr as usize;
-        // if addr >= 0x0000 && addr <= 0xFFFF {
-        self.ram[addr] = byte;
-        // }
-    }
-    pub fn read(&self, addr: u16, _readonly: bool) -> u8 {
-        let addr = addr as usize;
-        // if addr >= 0x0000 && addr <= 0xFFFF {
-        return self.ram[addr];
-        // }
-        // 0
+impl Default for Cpu {
+    fn default() -> Self {
+        Self::new()
     }
 }

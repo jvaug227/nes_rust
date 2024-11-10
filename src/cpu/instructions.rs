@@ -7,7 +7,7 @@ pub struct Instruction {
 }
 
 impl Instruction {
-    pub fn new(
+    pub const fn new(
                 operate: u8,
                 addrmode: u8,
                 ) -> Self {
@@ -24,11 +24,16 @@ impl Instruction {
 }
 
 
-pub fn create_lookup_table() -> [Instruction; 256] {
-        use super::InstructionOperations as O;
-        use super::InstructionAddressingModes as A;
-        let I = Instruction::new;
-    [
+pub mod lookup { 
+        use crate::cpu::InstructionAddressingModes as A;
+        use crate::cpu::InstructionOperations as O;
+
+        use super::Instruction;
+        // use Instruction::new as I;
+    const fn I(o: u8, a: u8) -> Instruction {
+        Instruction::new(o, a)
+    }
+    pub const LOOKUP_TABLE: [super::Instruction; 256] = [
         I(O::BRK, A::IMP),I(O::ORA, A::IDX),I(O::XXX, A::IMP),I(O::XXX, A::IDX),
         I(O::NOP, A::ZP0),I(O::ORA, A::ZP0),I(O::ASL, A::ZP0),I(O::XXX, A::ZP0),
         I(O::PHP, A::IMP),I(O::ORA, A::IMM),I(O::ASL, A::ACC),I(O::XXX, A::IMM),
@@ -100,7 +105,7 @@ pub fn create_lookup_table() -> [Instruction; 256] {
         I(O::NOP, A::ZPX),I(O::SBC, A::ZPX),I(O::INC, A::ZPX),I(O::XXX, A::ZPX),
         I(O::SED, A::IMP),I(O::SBC, A::ABY),I(O::NOP, A::IMP),I(O::XXX, A::ABY),
         I(O::NOP, A::ABX),I(O::SBC, A::ABX),I(O::INC, A::ABX),I(O::XXX, A::ABX),
-    ]
+    ];
 }
 
 #[allow(non_snake_case, dead_code)]
