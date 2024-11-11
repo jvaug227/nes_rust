@@ -219,6 +219,7 @@ pub struct Cpu {
 
     pub pipeline_status: PipelineStatus,
     pub page_boundary_crossed: bool,
+    pub internal_carry: bool,
 
     pub fetched: u8,
 
@@ -243,6 +244,7 @@ pub enum PipelineStatus {
     Exec3,
     Exec4,
     Exec5,
+    Exec6,
     IR,
 }
 
@@ -260,7 +262,8 @@ impl PipelineStatus {
             Self::Exec2 => Self::Exec3,
             Self::Exec3 => Self::Exec4,
             Self::Exec4 => Self::Exec5,
-            Self::Exec5 => Self::IR,
+            Self::Exec5 => Self::Exec6,
+            Self::Exec6 => Self::IR,
             Self::IR => Self::Addr0,
         }
     }
@@ -294,6 +297,7 @@ impl Cpu {
             status: Flags6502::empty(),
             pipeline_status: PipelineStatus::Addr0,
             page_boundary_crossed: false,
+            internal_carry: false,
             fetched: 0,
             addr_data: 0,
             opcode: 0,
@@ -313,9 +317,32 @@ impl Cpu {
 
     fn execute(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
 
-        let mut is_executing_stage = matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5);
+        let mut is_executing_stage = matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Exec6);
         let mut is_ir_stage = matches!(self.pipeline_status, PipelineStatus::IR);
         let is_addr_stage = !is_executing_stage && !is_ir_stage;
+
+        // Page boundary incurrs a +1 cycle cost
+        if self.page_boundary_crossed {
+            // println!("Page boundary: {phi}");
+            // Probably close-enough to a realistic re-creation
+            if !phi {
+                // Could also probably do something like, might infact get compiler-optimized to this
+                // self.addr_data = self.addr_data.wrapping_add(0x0100);
+                *address_bus = self.addr_data;
+                *address_rw = true;
+                return false;
+            } else {
+                _ = *data_bus;
+                let hi_byte = hi_byte(self.addr_data).wrapping_add(self.internal_carry as u8);
+                set_hi_byte(&mut self.addr_data, hi_byte);
+                self.page_boundary_crossed = false;
+                self.internal_carry = false;
+                /*if is_addr_stage { self.pipeline_status.advance(); }*/ // super hacky work-around until a better system for
+                                                                     // detecting and resolving page breaks is
+                                                                     // worked on - this pipeline is not very friendly for this
+                return false;
+            }
+        }
 
         if is_addr_stage {
             let finished_addressing = self.execute_addrmode(opcode, addrmode, address_bus, data_bus, address_rw, phi);
@@ -323,7 +350,7 @@ impl Cpu {
                 self.pipeline_status = PipelineStatus::Exec0;
                 is_executing_stage = !phi;
             } else {
-                if !self.page_boundary_crossed && phi {
+                if phi {
                     self.pipeline_status.advance(); 
                 }
                 return false;
@@ -367,23 +394,10 @@ impl Cpu {
         use InstructionOperations as InsOp;
         let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
         let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY);
+        let do_pagebreak_anyways = matches!(opcode, InsOp::STA) || is_rwm;
         
         let skip_read = is_mw;
 
-        // Page boundary incurrs a +1 cycle cost
-        if self.page_boundary_crossed {
-            println!("Page boundary: {phi}");
-            // Probably close-enough to a realistic re-creation
-            if !phi {
-                // Could also probably do something like, might infact get compiler-optimized to this
-                // self.addr_data = self.addr_data.wrapping_add(0x0100);
-                let hi_byte = hi_byte(self.addr_data).wrapping_add(1);
-                set_hi_byte(&mut self.addr_data, hi_byte);
-            } else {
-                self.page_boundary_crossed = false;
-            }
-            return false;
-        }
         let offset = match addrmode {
             Addr::ABX | Addr::ZPX => { self.x },
             Addr::ABY | Addr::ZPY => { self.y },
@@ -398,7 +412,7 @@ impl Cpu {
 
 
             (Addr::IMM | Addr::REL, PipelineStatus::Addr0, false) => { *address_bus = self.pc; *address_rw = true; false },
-            (Addr::IMM | Addr::REL, PipelineStatus::Addr0, true) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
+            (Addr::IMM | Addr::REL, PipelineStatus::Addr0, true ) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
             (Addr::IMM | Addr::REL, PipelineStatus::Addr1, false) => { true }, // Rel offset is stored in both fetched and addr_data
             (Addr::IMM | Addr::REL, PipelineStatus::Addr1, true ) => { true }, // shouldn't be reached but nonetheless
 
@@ -414,14 +428,14 @@ impl Cpu {
             (_, PipelineStatus::Addr0, true ) => { self.fetched = *data_bus; self.addr_data = *data_bus as u16; self.pc += 1; false }
 
             (Addr::ZPX, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.x) as u16; false }, // These have no page-boundary since they will only access page 0
-            (Addr::ZPX, PipelineStatus::Addr1, true ) => { !skip_read }, // should dummy-read maybe
+            (Addr::ZPX, PipelineStatus::Addr1, true ) => { skip_read }, // should dummy-read maybe
             (Addr::ZPX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ZPX, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
             (Addr::ZPX, PipelineStatus::Addr3, false) => { true },
             (Addr::ZPX, PipelineStatus::Addr3, true ) => { true }, // shouldn't be reached but nonetheless
 
             (Addr::ZPY, PipelineStatus::Addr1, false) => { self.addr_data = u8::wrapping_add(lo_byte(self.addr_data), self.y) as u16; false },
-            (Addr::ZPY, PipelineStatus::Addr1, true ) => { !skip_read }, // should dummy-read maybe
+            (Addr::ZPY, PipelineStatus::Addr1, true ) => { skip_read }, // should dummy-read maybe
             (Addr::ZPY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ZPY, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
             (Addr::ZPY, PipelineStatus::Addr3, false) => { true },
@@ -442,37 +456,31 @@ impl Cpu {
             (Addr::ABS, PipelineStatus::Addr3, false) => { true },
             (Addr::ABS, PipelineStatus::Addr3, true ) => { true },
 
-            (Addr::ABX, PipelineStatus::Addr1, false) => {
+            (Addr::ABX, PipelineStatus::Addr1, false) => { *address_bus = self.pc; *address_rw = true; self.pc += 1; false },
+            (Addr::ABX, PipelineStatus::Addr1, true ) => {
+                set_hi_byte(&mut self.addr_data, *data_bus);
                 let old_lo_byte = lo_byte(self.addr_data);
                 let new_lo_byte = old_lo_byte.wrapping_add(offset);
                 set_lo_byte(&mut self.addr_data, new_lo_byte);
-                self.page_boundary_crossed = new_lo_byte < old_lo_byte;
-
-                *address_bus = self.pc;
-                *address_rw = true;
-                self.pc += 1;
-
-                false
-            },
-            (Addr::ABX, PipelineStatus::Addr1, true ) => { set_hi_byte(&mut self.addr_data, *data_bus); skip_read }
+                self.internal_carry = new_lo_byte < old_lo_byte;
+                self.page_boundary_crossed = do_pagebreak_anyways || self.internal_carry;
+                skip_read
+            }
             (Addr::ABX, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ABX, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
-            (Addr::ABX, PipelineStatus::Addr3, false) => { !is_rwm } // if this is DEC, this cycle is dedicated to fixing page boundary
-            (Addr::ABX, PipelineStatus::Addr3, true ) => { false }
+            (Addr::ABX, PipelineStatus::Addr3, false) => { true } // if this is DEC, this cycle is dedicated to fixing page boundary
+            (Addr::ABX, PipelineStatus::Addr3, true ) => { true }
 
-            (Addr::ABY, PipelineStatus::Addr1, false) => {
+            (Addr::ABY, PipelineStatus::Addr1, false) => { *address_bus = self.pc; *address_rw = true; self.pc += 1; false },
+            (Addr::ABY, PipelineStatus::Addr1, true ) => {
+                set_hi_byte(&mut self.addr_data, *data_bus);
                 let old_lo_byte = lo_byte(self.addr_data);
                 let new_lo_byte = old_lo_byte.wrapping_add(offset);
                 set_lo_byte(&mut self.addr_data, new_lo_byte);
-                self.page_boundary_crossed = new_lo_byte < old_lo_byte;
-
-                *address_bus = self.pc;
-                *address_rw = true;
-                self.pc += 1;
-
-                false
-            },
-            (Addr::ABY, PipelineStatus::Addr1, true ) => { set_hi_byte(&mut self.addr_data, *data_bus); skip_read }
+                self.internal_carry = new_lo_byte < old_lo_byte;
+                self.page_boundary_crossed = do_pagebreak_anyways || self.internal_carry;
+                skip_read
+            }
             (Addr::ABY, PipelineStatus::Addr2, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::ABY, PipelineStatus::Addr2, true ) => { self.fetched = *data_bus; false }
             (Addr::ABY, PipelineStatus::Addr3, false) => { true },
@@ -534,15 +542,26 @@ impl Cpu {
             (Addr::IDY, PipelineStatus::Addr2, false) => {
                 *address_bus = lo_byte(self.addr_data) as u16; // grab zp address before we replace it
                 *address_rw = true;
+                false
+            }
+            (Addr::IDY, PipelineStatus::Addr2, true ) => {
+                set_hi_byte(&mut self.addr_data, *data_bus);
                 let old_lo_byte = self.fetched;
                 let new_lo_byte = self.fetched.wrapping_add(self.y);
                 set_lo_byte(&mut self.addr_data, new_lo_byte);
-                self.page_boundary_crossed = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and 
-                                                                        // addition creates a lower value than we started with
+                self.internal_carry = new_lo_byte < old_lo_byte; // page-boundary crossed if we wrapped around and addition creates a lower value than we started with
+                self.page_boundary_crossed = do_pagebreak_anyways || self.internal_carry; // we always do a page-boundary fix in idy for some reason in STA
+                skip_read
+            }
+            (Addr::IDY, PipelineStatus::Addr3, false) => {
+                if do_pagebreak_anyways {
+                    // we page breaked and ended up here when we were not supposed to
+                    return true;
+                }
+                *address_bus = self.addr_data;
+                *address_rw = true;
                 false
             }
-            (Addr::IDY, PipelineStatus::Addr2, true ) => { set_hi_byte(&mut self.addr_data, *data_bus); skip_read }
-            (Addr::IDY, PipelineStatus::Addr3, false) => { *address_bus = self.addr_data; *address_rw = true; false }
             (Addr::IDY, PipelineStatus::Addr3, true ) => { self.fetched = *data_bus; false }
 
             _ => { true }
@@ -635,25 +654,29 @@ impl Cpu {
                 self.branch(self.get_flag(Flags6502::V))
             }
             (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec0, true) => { false }
+            // Intercpting page-break handler will handle this for us
             (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, false) => {
                 // const sign_extended: u16 = b as i8 as i16 as u16;
                 // const high_offset: u8 = (sign_extended >> 8) as u8;
                 let sign_extended = hi_byte(self.fetched as i8 as i16 as u16);
+                let overflowed = self.internal_carry;
+                let underflowed = sign_extended > 0;
                 // If the high byte is incorrect due to passing a page boundary or subtraction
                 // Insert fix-PC_H microcode
-                if self.page_boundary_crossed || sign_extended > 0 {
+                if (overflowed || underflowed) && !(overflowed && underflowed) {
                     let old_hi_byte = hi_byte(self.pc);
-                    let new_hi_byte = old_hi_byte.wrapping_add(sign_extended).wrapping_add(self.page_boundary_crossed as u8);
+                    let new_hi_byte = old_hi_byte.wrapping_add(sign_extended).wrapping_add(self.internal_carry as u8);
                     set_hi_byte(&mut self.pc, new_hi_byte);
-                    self.page_boundary_crossed = false;
+                    self.internal_carry = false;
                     false
                 } else {
                     // we are done, fetch next instruction
                     true
                 }
+                // false
             }
-            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, true) => { false }
-            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec2, _) => { true }
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, true) => { true }
+            (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec2, _) => { true } // possibly unneeded
             // Bit Test
             (InsOp::BIT, PS::Exec0, false) => {
                 let temp = self.a & self.fetched;
@@ -665,22 +688,32 @@ impl Cpu {
             (InsOp::BIT, PS::Exec0, true) => { true },
             // BRK - Force Inturrupt
             (InsOp::BRK, PS::Exec0, false) => {
+                *address_bus = self.addr_data;
+                *address_rw = true;
+                false
+            }
+            (InsOp::BRK, PS::Exec0, true) => {
+                _ = *data_bus;
+                self.pc = self.pc.wrapping_add(1);
+                false
+            }
+            (InsOp::BRK, PS::Exec1, false) => {
                 self.fetched = hi_byte(self.pc);
                 *address_bus = 0x0100 + (self.stkpt as u16);
                 *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
-            (InsOp::BRK, PS::Exec0, true) => { *data_bus = self.fetched; false }
-            (InsOp::BRK, PS::Exec1, false) => {
+            (InsOp::BRK, PS::Exec1, true) => { *data_bus = self.fetched; false }
+            (InsOp::BRK, PS::Exec2, false) => {
                 self.fetched = lo_byte(self.pc);
                 *address_bus = 0x0100 + (self.stkpt as u16);
                 *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
-            (InsOp::BRK, PS::Exec1, true) => { *data_bus = self.fetched; false}
-            (InsOp::BRK, PS::Exec2, false) => {
+            (InsOp::BRK, PS::Exec2, true) => { *data_bus = self.fetched; false}
+            (InsOp::BRK, PS::Exec3, false) => {
                 self.fetched = (self.status | Flags6502::B | Flags6502::U).bits();
                 *address_bus = 0x0100 + (self.stkpt as u16);
                 *address_rw = false;
@@ -688,12 +721,12 @@ impl Cpu {
                 self.set_flag(Flags6502::I, true);
                 false
             },
-            (InsOp::BRK, PS::Exec2, true) => { *data_bus = self.fetched; false }
-            (InsOp::BRK, PS::Exec3, false) => { *address_bus = 0xFFFE; *address_rw = true; false },
-            (InsOp::BRK, PS::Exec3, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
-            (InsOp::BRK, PS::Exec4, false) => { *address_bus = 0xFFFF; *address_rw = true; false },
-            (InsOp::BRK, PS::Exec4, true) => { set_hi_byte(&mut self.pc, *data_bus); false },
-            (InsOp::BRK, PS::Exec5, _) => { true },
+            (InsOp::BRK, PS::Exec3, true) => { *data_bus = self.fetched; false }
+            (InsOp::BRK, PS::Exec4, false) => { *address_bus = 0xFFFE; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec4, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
+            (InsOp::BRK, PS::Exec5, false) => { *address_bus = 0xFFFF; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec5, true) => { set_hi_byte(&mut self.pc, *data_bus); false },
+            (InsOp::BRK, PS::Exec6, _) => { true },
             // Clear Carry Flag
             (InsOp::CLC, PS::Exec0, _) => { self.set_flag(Flags6502::C, false); true }
             // Clear Decimal Mode
@@ -943,7 +976,7 @@ impl Cpu {
             (InsOp::SEI, PS::Exec0, _) => { self.set_flag(Flags6502::I, true); true }
             // Store Accumulator
             (InsOp::STA, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; self.fetched = self.a; false }
-            (InsOp::STA, PS::Exec0, true) => { *data_bus = self.fetched; false }
+            (InsOp::STA, PS::Exec0, true) => { *data_bus = self.fetched; true }
             (InsOp::STA, PS::Exec1, _) => { true }
             // Store X register
             (InsOp::STX, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; self.fetched = self.x; false }
@@ -1119,7 +1152,8 @@ impl Cpu {
             let old_lo_byte = lo_byte(self.pc);
             let new_lo_byte = old_lo_byte.wrapping_add(self.fetched);
             set_lo_byte(&mut self.pc, new_lo_byte);
-            self.page_boundary_crossed = new_lo_byte < old_lo_byte; // X + FF = X-1
+            self.internal_carry = new_lo_byte < old_lo_byte; // X + FF = X-1
+            // self.page_boundary_crossed = self.internal_carry;
         }
         !flag // we passed, so actually don't finish instruction
     }

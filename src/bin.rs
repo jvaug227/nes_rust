@@ -282,6 +282,8 @@ impl App {
                 if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
                     self.last_time = current_time;
                     self.nes.clock();
+                    self.nes.clock();
+                    self.nes.clock();
                 }
             },
             WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
@@ -331,7 +333,9 @@ struct NESBoard {
 impl NESBoard {
     fn new(cpu: Cpu, ram: Vec<u8>) -> NESBoard {
         let debug_buffer = b"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX\n".to_vec();
-        NESBoard { ram, cpu, cpu_copy: cpu, debug_buffer, addr_rw: true, addr_bus: 0, data_bus: 0 }
+        let mut cpu_copy = cpu;
+        cpu_copy.pc -= 1;
+        NESBoard { ram, cpu, cpu_copy, debug_buffer, addr_rw: true, addr_bus: 0, data_bus: 0 }
     }
 
     // Emulate one master clok cycle
@@ -344,6 +348,7 @@ impl NESBoard {
         if self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true) {
             self.print_log();
             self.cpu_copy = self.cpu; // update the copy
+            self.cpu_copy.pc -= 1; // pc increments before we can copy it
         }
         if !self.addr_rw {
             let addr = self.addr_bus as usize;
