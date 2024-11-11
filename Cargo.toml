@@ -7,13 +7,14 @@ edition = "2021"
 name = "nes_rust"
 path = "src/lib.rs"
 
-[[bin]]
-name = "nes_rust_bin"
-path = "src/bin.rs"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bitflags = "2.6.0"
+
+[dev-dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
 lazy_static = "1.5"
 winit = "0.30"
 egui = "0.29"
@@ -21,7 +22,3 @@ egui-winit = "0.29"
 egui-wgpu = "0.29"
 pollster = "0.3"
 wgpu = "22.1"
-bitflags = "2.6.0"
-anyhow = "1.0"
-thiserror = "1.0"
-
