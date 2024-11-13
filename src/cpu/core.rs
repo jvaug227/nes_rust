@@ -246,6 +246,7 @@ pub struct Cpu {
 
     pub pipeline_status: PipelineStatus,
     pub page_boundary_crossed: bool,
+    pub did_page_break_this_instruction: bool,
     pub internal_carry: bool,
 
     pub fetched: u8,
@@ -325,6 +326,7 @@ impl Cpu {
             status: Flags6502::empty(),
             pipeline_status: PipelineStatus::Addr0,
             page_boundary_crossed: false,
+            did_page_break_this_instruction: false,
             internal_carry: false,
             fetched: 0,
             temp: 0,
@@ -352,6 +354,7 @@ impl Cpu {
 
         // Page boundary incurrs a +1 cycle cost
         if self.page_boundary_crossed {
+            self.did_page_break_this_instruction = true;
             // println!("Page boundary: {phi}");
             // Probably close-enough to a realistic re-creation
             if !phi {
@@ -409,6 +412,7 @@ impl Cpu {
             self.pc += 1;
             
             self.pipeline_status = PipelineStatus::Addr0;
+            self.did_page_break_this_instruction = false;
             return true;
         }
 
@@ -1172,41 +1176,43 @@ impl Cpu {
 
             (InsOp::SHA, PS::Exec0, false) => {
                 self.temp = self.a & self.x;
-                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_bus = self.instable_store_address(self.temp, self.addr_data);
                 *address_rw = false;
                 false
             }
-            (InsOp::SHA, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHA, PS::Exec0, true ) => { *data_bus = self.instable_store_value(self.temp, self.addr_data); true }
             (InsOp::SHA, PS::Exec1, _) => { true }
 
             (InsOp::SHX, PS::Exec0, false) => {
                 self.temp = self.x;
-                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_bus = self.instable_store_address(self.temp, self.addr_data);
                 *address_rw = false;
                 false
             }
-            (InsOp::SHX, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHX, PS::Exec0, true ) => { *data_bus = self.instable_store_value(self.temp, self.addr_data); true }
             (InsOp::SHX, PS::Exec1, _) => { true }
 
             (InsOp::SHY, PS::Exec0, false) => {
                 self.temp = self.y;
-                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_bus = self.instable_store_address(self.temp, self.addr_data);
                 *address_rw = false;
                 false
             }
-            (InsOp::SHY, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHY, PS::Exec0, true ) => { *data_bus = self.instable_store_value(self.temp, self.addr_data); true }
             (InsOp::SHY, PS::Exec1, _) => { true }
 
             (InsOp::TAS, PS::Exec0, false) => { false }
-            (InsOp::TAS, PS::Exec0, true ) => {
-                self.temp = self.a & self.x;
-                self.stkpt = Self::instable_store_value(self.temp, self.addr_data);
-                true
+            (InsOp::TAS, PS::Exec0, true ) => { self.stkpt = self.a & self.x; false }
+            (InsOp::TAS, PS::Exec1, false) => {
+                *address_bus = self.instable_store_address(self.stkpt, self.addr_data);
+                *address_rw = false;
+                false
             }
-            (InsOp::TAS, PS::Exec1, _) => { true }
+            (InsOp::TAS, PS::Exec1, true ) => { *data_bus = self.instable_store_value(self.stkpt, self.addr_data); true }
+            (InsOp::TAS, PS::Exec2, _) => { true }
 
             (InsOp::ANE, PS::Exec0, false) => {
-                let magic_number = 0xEF; // this is hardcoded but should be completely random or dependant on the RDY line; its recommended to use 0xEE when RDY enabled and 0xFF otherwise
+                let magic_number = 0xEE; // this is hardcoded but should be completely random or dependant on the RDY line; its recommended to use 0xEE when RDY enabled and 0xFF otherwise
                 self.a = (self.a | magic_number) & self.x & self.fetched;
                 self.check_nz_flags(self.a);
                 true
@@ -1216,7 +1222,10 @@ impl Cpu {
                 self.temp = (self.a | magic_number) & self.fetched;
                 self.a = self.temp;
                 self.x = self.temp;
-                self.check_nz_flags(self.a);
+                self.check_nz_flags(self.a); // TODO: find is this is correct. This being set after
+                                             // calculation is the only way it works with
+                                             // SingStepTests, but is indicated by NoMoreSecrets to
+                                             // be set before calculations
                 true
             }
 
@@ -1402,15 +1411,16 @@ impl Cpu {
         self.a = lo_byte(temp);
     }
 
-    fn instable_store_value(value: u8, address: u16) -> u8 {
+    fn instable_store_value(&self, value: u8, address: u16) -> u8 {
         let dmad = false;
+        let page_breaked = self.did_page_break_this_instruction;
         let hi_byte = hi_byte(address);
-        if !dmad { hi_byte.wrapping_add(1) & value } else { value }
+        if !dmad { hi_byte.wrapping_add(1 - page_breaked as u8) & value } else { value }
     }
-    fn instable_store_address(value: u8, mut address: u16) -> u16 {
-        let page_crossed = false;
+    fn instable_store_address(&self, value: u8, mut address: u16) -> u16 {
+        let page_crossed = self.did_page_break_this_instruction;
         let hi_byte = hi_byte(address);
-        let hi_byte = if page_crossed { hi_byte.wrapping_add(1) & value } else { hi_byte };
+        let hi_byte = if page_crossed { hi_byte/*.wrapping_add(1)*/ & value } else { hi_byte }; // hi byte is already taken care of
         set_hi_byte(&mut address, hi_byte);
         address
     }

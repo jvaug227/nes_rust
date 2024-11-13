@@ -81,7 +81,7 @@ pub mod lookup {
 
         I(O::LDY, A::IMM),I(O::LDA, A::IDX),I(O::LDX, A::IMM),I(O::LAX, A::IDX),
         I(O::LDY, A::ZP0),I(O::LDA, A::ZP0),I(O::LDX, A::ZP0),I(O::LAX, A::ZP0),
-        I(O::TAY, A::IMP),I(O::LDA, A::IMM),I(O::TAX, A::IMP),I(O::LAX, A::IMM),
+        I(O::TAY, A::IMP),I(O::LDA, A::IMM),I(O::TAX, A::IMP),I(O::ANX, A::IMM),
         I(O::LDY, A::ABS),I(O::LDA, A::ABS),I(O::LDX, A::ABS),I(O::LAX, A::ABS),
         I(O::BCS, A::REL),I(O::LDA, A::IDY),I(O::JAM, A::REL),I(O::LAX, A::IDY),
         I(O::LDY, A::ZPX),I(O::LDA, A::ZPX),I(O::LDX, A::ZPY),I(O::LAX, A::ZPY),
