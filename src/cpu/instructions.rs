@@ -63,9 +63,9 @@ pub mod lookup {
 
         I(O::RTS, A::IMP),I(O::ADC, A::IDX),I(O::JAM, A::IMP),I(O::RRA, A::IDX),
         I(O::NOP, A::ZP0),I(O::ADC, A::ZP0),I(O::ROR, A::ZP0),I(O::RRA, A::ZP0),
-        I(O::PLA, A::IMP),I(O::ADC, A::IMM),I(O::ROR, A::ACC),I(O::ALR, A::IMM),
+        I(O::PLA, A::IMP),I(O::ADC, A::IMM),I(O::ROR, A::ACC),I(O::ARR, A::IMM),
         I(O::JMP, A::IND),I(O::ADC, A::ABS),I(O::ROR, A::ABS),I(O::RRA, A::ABS),
-        I(O::BVS, A::REL),I(O::ADC, A::IDY),I(O::JAM, A::REL),I(O::SRE, A::IDY),
+        I(O::BVS, A::REL),I(O::ADC, A::IDY),I(O::JAM, A::REL),I(O::RRA, A::IDY),
         I(O::NOP, A::ZPX),I(O::ADC, A::ZPX),I(O::ROR, A::ZPX),I(O::RRA, A::ZPX),
         I(O::SEI, A::IMP),I(O::ADC, A::ABY),I(O::NOP, A::IMP),I(O::RRA, A::ABY),
         I(O::NOP, A::ABX),I(O::ADC, A::ABX),I(O::ROR, A::ABX),I(O::RRA, A::ABX),

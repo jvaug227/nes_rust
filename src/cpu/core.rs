@@ -1097,14 +1097,6 @@ impl Cpu {
             (InsOp::RRA, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
             (InsOp::RRA, PS::Exec1, true ) => { *data_bus = self.temp; false }
             (InsOp::RRA, PS::Exec2, false) => {
-                // let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
-                //
-                // self.check_nzc_flags(temp);
-                // self.set_flag(
-                //     Flags6502::V,
-                //     ((!(self.a as u16 ^ self.fetched as u16) & (self.a as u16 ^ temp)) & 0x0080) > 0,
-                // );
-                // self.a = (temp & 0x00FF) as u8;
                 self.add_carry(self.temp);
                 true
             }
@@ -1149,13 +1141,14 @@ impl Cpu {
             (InsOp::ALR, PS::Exec0, true ) => { true }
 
             (InsOp::ARR, PS::Exec0, false) => {
+                let carry_in = self.get_flag(Flags6502::C) as u8;
                 self.temp = self.a & self.fetched;
-                self.a = (self.temp >> 1) | ((self.get_flag(Flags6502::C) as u8) << 7); // confirm C flag is inserted at the right location
-                self.check_nz_flags(self.a);
-                let b7 = (self.temp & 0x80) >> 7;
-                let b6 = (self.temp & 0x40) >> 6;
+                let b7 = (self.temp & 0x80) >> 1;
+                let b6 =  self.temp & 0x40;
                 self.set_flag(Flags6502::C, b7 > 0);
                 self.set_flag(Flags6502::V, (b7 ^ b6) > 0);
+                self.a = (self.temp >> 1) | (carry_in << 7); // confirm C flag is inserted at the right location
+                self.check_nz_flags(self.a);
                 true
             }
             (InsOp::ARR, PS::Exec0, true ) => { true }
