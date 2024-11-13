@@ -339,7 +339,6 @@ impl Cpu {
 
     // Perform one instruction worth of emulation
     pub fn clock(&mut self, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
-        // println!("Clock: {:?}", self.pipeline_status);
         self.cycles = self.cycles.wrapping_add(phi as usize);
         let instruction = lookup::LOOKUP_TABLE[self.opcode as usize];
         
@@ -355,11 +354,7 @@ impl Cpu {
         // Page boundary incurrs a +1 cycle cost
         if self.page_boundary_crossed {
             self.did_page_break_this_instruction = true;
-            // println!("Page boundary: {phi}");
-            // Probably close-enough to a realistic re-creation
             if !phi {
-                // Could also probably do something like, might infact get compiler-optimized to this
-                // self.addr_data = self.addr_data.wrapping_add(0x0100);
                 *address_bus = self.addr_data;
                 *address_rw = true;
                 return false;
@@ -369,9 +364,6 @@ impl Cpu {
                 set_hi_byte(&mut self.addr_data, hi_byte);
                 self.page_boundary_crossed = false;
                 self.internal_carry = false;
-                /*if is_addr_stage { self.pipeline_status.advance(); }*/ // super hacky work-around until a better system for
-                                                                     // detecting and resolving page breaks is
-                                                                     // worked on - this pipeline is not very friendly for this
                 return false;
             }
         }
@@ -601,12 +593,6 @@ impl Cpu {
         }
     }
 
-    /// TODO: Find out why ABS_X or ABS_Y or IND_Y in ASL, DEC, INC, LSR, ROL,
-    /// ROR, STA requires an extra cycle compared to ABS, according to [Obelisk](https://www.nesdev.org/obelisk-6502-guide/reference.html)
-    /// E.g. zp,x, abs, abs,x and abs,y usually are 4 cycles in most instructions with (ind, x) being 6
-    /// and (ind),y being 5. In STA, abs,x and abs,y are 5 while (ind),y is 6.
-    /// Edit: looks to be caused by write-instructions always fixing the PCH, even if it doesn't
-    /// need it
     fn execute_instruction(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionOperations as InsOp;
         use PipelineStatus as PS;
@@ -809,7 +795,6 @@ impl Cpu {
             // Jump to address
             (InsOp::JMP, PS::Exec0, _) => { true } //self.pc = self.addr_data; // already taken care of in addrmode execution
             // Jump to subroutine
-            // ~~TODO: Check cycle correctness~~
             // INFO: JSR is apparently done very weirdly:
             // 1. Read lo byte of data
             // 2. Read stkptr for some reason
@@ -988,17 +973,7 @@ impl Cpu {
             (InsOp::RTS, PS::Exec4, _) => { true }
 
             // Subtract with carry
-            // TODO: Confirm subtraction works
             (InsOp::SBC, PS::Exec0, false) => {
-                // let value = (!self.fetched) as u16;
-                // let temp = self.a as u16 + value + self.get_flag(Flags6502::C) as u16;
-                // self.set_flag(Flags6502::C, temp & 0xFF00 > 0);
-                // self.check_nz_flags(temp as u8);
-                // self.set_flag(
-                //     Flags6502::V,
-                //     ((temp ^ self.a as u16) & (temp ^ value) & 0x0080) > 0,
-                // );
-                // self.a = lo_byte(temp);
                 self.add_carry(!self.fetched);
                 true
             }
@@ -1374,7 +1349,6 @@ impl Cpu {
     /// If PC_l + r yeilds a new PC_l less than the original, a page boundary was crossed
     /// and the high byte needs to be changed, this is is true whether the offset was negative or
     /// positive
-    /// TODO: Confirm branch mechanics
     fn branch(&mut self, flag: bool) -> bool {
         if flag {
             let old_lo_byte = lo_byte(self.pc);
