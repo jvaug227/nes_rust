@@ -88,7 +88,34 @@ pub mod InstructionOperations {
     pub const TXS: u8 = 0x36;
     pub const TYA: u8 = 0x37;
 
-    pub const XXX: u8 = 0x00; // Illegal Opcode
+    // Stable opcodes
+    pub const SLO: u8 = 0x38;
+    pub const RLA: u8 = 0x39;
+    pub const SRE: u8 = 0x3A;
+    pub const RRA: u8 = 0x3B;
+    pub const SAX: u8 = 0x3C;
+    pub const LAX: u8 = 0x3D;
+    pub const DCP: u8 = 0x3E;
+    pub const ISC: u8 = 0x3F;
+    pub const ANC: u8 = 0x40;
+    pub const ALR: u8 = 0x41;
+    pub const ARR: u8 = 0x42;
+    pub const SBX: u8 = 0x43;
+    // SBC duplicate
+
+    // slightly unstable opcodes
+    pub const SHA: u8 = 0x44;
+    pub const SHY: u8 = 0x45;
+    pub const SHX: u8 = 0x46;
+    pub const TAS: u8 = 0x47;
+    pub const LAS: u8 = 0x48;
+
+    // unstable opcodes
+    // Lax imm
+    pub const ANE: u8 = 0x49;
+    pub const ANX: u8 = 0x50;
+
+    pub const JAM: u8 = 0x51;
 }
 
 #[allow(non_snake_case)]
@@ -222,6 +249,7 @@ pub struct Cpu {
     pub internal_carry: bool,
 
     pub fetched: u8,
+    pub temp: u8,
 
     pub addr_data: u16,
 
@@ -299,6 +327,7 @@ impl Cpu {
             page_boundary_crossed: false,
             internal_carry: false,
             fetched: 0,
+            temp: 0,
             addr_data: 0,
             opcode: 0,
             cycles: 0,
@@ -393,7 +422,7 @@ impl Cpu {
         use InstructionAddressingModes as Addr;
         use InstructionOperations as InsOp;
         let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
-        let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY);
+        let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY | InsOp::SAX);
         let do_pagebreak_anyways = matches!(opcode, InsOp::STA) || is_rwm;
         
         let skip_read = is_mw;
@@ -583,15 +612,16 @@ impl Cpu {
             },
             // Add with carry
             (InsOp::ADC, PS::Exec0, false) => {
-                let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
-
-                self.check_nzc_flags(temp);
-                self.set_flag(
-                    Flags6502::V,
-                    ((!(self.a as u16 ^ self.fetched as u16) & (self.a as u16 ^ temp)) & 0x0080)
-                        > 0,
-                );
-                self.a = (temp & 0x00FF) as u8;
+                // let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
+                //
+                // self.check_nzc_flags(temp);
+                // self.set_flag(
+                //     Flags6502::V,
+                //     ((!(self.a as u16 ^ self.fetched as u16) & (self.a as u16 ^ temp)) & 0x0080)
+                //         > 0,
+                // );
+                // self.a = (temp & 0x00FF) as u8;
+                self.add_carry(self.fetched);
                 true
             }
             (InsOp::ADC, PS::Exec0, true ) => { true } // possible unneeded
@@ -956,15 +986,16 @@ impl Cpu {
             // Subtract with carry
             // TODO: Confirm subtraction works
             (InsOp::SBC, PS::Exec0, false) => {
-                let value = (!self.fetched) as u16;
-                let temp = self.a as u16 + value + self.get_flag(Flags6502::C) as u16;
-                self.set_flag(Flags6502::C, temp & 0xFF00 > 0);
-                self.check_nz_flags(temp as u8);
-                self.set_flag(
-                    Flags6502::V,
-                    ((temp ^ self.a as u16) & (temp ^ value) & 0x0080) > 0,
-                );
-                self.a = lo_byte(temp);
+                // let value = (!self.fetched) as u16;
+                // let temp = self.a as u16 + value + self.get_flag(Flags6502::C) as u16;
+                // self.set_flag(Flags6502::C, temp & 0xFF00 > 0);
+                // self.check_nz_flags(temp as u8);
+                // self.set_flag(
+                //     Flags6502::V,
+                //     ((temp ^ self.a as u16) & (temp ^ value) & 0x0080) > 0,
+                // );
+                // self.a = lo_byte(temp);
+                self.add_carry(!self.fetched);
                 true
             }
             (InsOp::SBC, PS::Exec0, true) => { true }
@@ -1004,6 +1035,201 @@ impl Cpu {
             // Transfer Y to Accumulator
             (InsOp::TYA, PS::Exec0, false) => { self.a = self.y; self.check_nz_flags(self.a); true }
             (InsOp::TYA, PS::Exec0, true) => {  true } // possibly unneeded
+
+            // Some of these instructions are a tad confusing since NoMoreSecrets doesn't state whether A is
+            // operated with the original fetched value or the altered value. Just going to assume
+            // project c74 is correct
+            (InsOp::SLO, PS::Exec0, false) => { false }
+            (InsOp::SLO, PS::Exec0, true) => { 
+                self.temp = self.fetched << 1; 
+                self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0); 
+                self.check_nz_flags(self.temp); 
+                false 
+            }
+            (InsOp::SLO, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::SLO, PS::Exec1, true) => { *data_bus = self.temp; false }
+            (InsOp::SLO, PS::Exec2, false) => {
+                self.a = self.a | self.temp;
+                self.check_nz_flags(self.a);
+                true
+            } // this could  potentially be a phi2 operation, but its in phi1 due to the need for IR to also be fetched, same for similar following operatins
+            (InsOp::SLO, PS::Exec2, true) => { true }
+
+            (InsOp::RLA, PS::Exec0, false) => { false }
+            (InsOp::RLA, PS::Exec0, true ) => {
+                self.temp = (self.fetched << 1) | (self.get_flag(Flags6502::C) as u8);
+                self.set_flag(Flags6502::C, (self.fetched & 0x80) > 0);
+                self.check_nz_flags(self.temp);
+                false
+            }
+            (InsOp::RLA, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::RLA, PS::Exec1, true ) => { *data_bus = self.temp; false }
+            (InsOp::RLA, PS::Exec2, false) => {
+                self.a = self.a & self.temp;
+                self.check_nz_flags(self.a);
+                true
+            }
+            (InsOp::RLA, PS::Exec2, true ) => { true }
+
+            (InsOp::SRE, PS::Exec0, false) => { false }
+            (InsOp::SRE, PS::Exec0, true ) => {
+                self.temp = self.fetched >> 1;
+                self.set_flag(Flags6502::C, (self.fetched & 0x01) > 0);
+                self.check_nz_flags(self.temp);
+                false
+            }
+            (InsOp::SRE, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::SRE, PS::Exec1, true ) => { *data_bus = self.temp; false }
+            (InsOp::SRE, PS::Exec2, false) => {
+                self.a = self.a ^ self.temp;
+                self.check_nz_flags(self.a);
+                true
+            }
+            (InsOp::SRE, PS::Exec2, true ) => { true }
+
+            (InsOp::RRA, PS::Exec0, false) => { false }
+            (InsOp::RRA, PS::Exec0, true ) => {
+                self.temp = (self.fetched >> 1) | ((self.get_flag(Flags6502::C) as u8) << 7);
+                self.set_flag(Flags6502::C, (self.fetched & 0x01) > 0);
+                self.check_nz_flags(self.temp);
+                false
+            }
+            (InsOp::RRA, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::RRA, PS::Exec1, true ) => { *data_bus = self.temp; false }
+            (InsOp::RRA, PS::Exec2, false) => {
+                // let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
+                //
+                // self.check_nzc_flags(temp);
+                // self.set_flag(
+                //     Flags6502::V,
+                //     ((!(self.a as u16 ^ self.fetched as u16) & (self.a as u16 ^ temp)) & 0x0080) > 0,
+                // );
+                // self.a = (temp & 0x00FF) as u8;
+                self.add_carry(self.temp);
+                true
+            }
+            (InsOp::RRA, PS::Exec2, true ) => { true }
+
+            (InsOp::SAX, PS::Exec0, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::SAX, PS::Exec0, true ) => { *data_bus = self.a & self.x; true }
+            (InsOp::SAX, PS::Exec1, _ ) => { true }
+
+            (InsOp::LAX, PS::Exec0, false) => { self.a = self.fetched; self.x = self.fetched; self.check_nz_flags(self.a); true } // confirm cycle counts
+            (InsOp::LAX, PS::Exec0, true ) => { true }
+
+            (InsOp::DCP, PS::Exec0, false) => { false }
+            (InsOp::DCP, PS::Exec0, true ) => { self.temp = self.decrement(self.fetched); false }
+            (InsOp::DCP, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::DCP, PS::Exec1, true ) => { *data_bus = self.temp; false }
+            (InsOp::DCP, PS::Exec2, false) => { self.compare(self.a, self.temp); true } // no idea if cmp should use temp or fetched
+            (InsOp::DCP, PS::Exec2, true ) => { true }
+
+            (InsOp::ISC, PS::Exec0, false) => { false }
+            (InsOp::ISC, PS::Exec0, true ) => { self.temp = self.increment(self.fetched); false }
+            (InsOp::ISC, PS::Exec1, false) => { *address_bus = self.addr_data; *address_rw = false; false }
+            (InsOp::ISC, PS::Exec1, true ) => { *data_bus = self.temp; false }
+            (InsOp::ISC, PS::Exec2, false) => { self.add_carry(!self.temp); true }
+            (InsOp::ISC, PS::Exec2, true ) => { true }
+
+            (InsOp::ANC, PS::Exec0, false) => {
+                self.a = self.a & self.fetched;
+                self.check_nz_flags(self.a);
+                self.set_flag(Flags6502::C, self.get_flag(Flags6502::N));
+                true
+            }
+            (InsOp::ANC, PS::Exec0, true ) => { true }
+
+            (InsOp::ALR, PS::Exec0, false) => {
+                self.temp = self.a & self.fetched;
+                self.a = self.temp >> 1;
+                self.set_flag(Flags6502::C, (self.temp & 0x01) > 0);
+                self.check_nz_flags(self.a);
+                true
+            }
+            (InsOp::ALR, PS::Exec0, true ) => { true }
+
+            (InsOp::ARR, PS::Exec0, false) => {
+                self.temp = self.a & self.fetched;
+                self.a = (self.temp >> 1) | ((self.get_flag(Flags6502::C) as u8) << 7); // confirm C flag is inserted at the right location
+                self.check_nz_flags(self.a);
+                let b7 = (self.temp & 0x80) >> 7;
+                let b6 = (self.temp & 0x40) >> 6;
+                self.set_flag(Flags6502::C, b7 > 0);
+                self.set_flag(Flags6502::V, (b7 ^ b6) > 0);
+                true
+            }
+            (InsOp::ARR, PS::Exec0, true ) => { true }
+
+            (InsOp::SBX, PS::Exec0, false) => {
+                self.compare(self.a & self.x, self.fetched);
+                self.x = self.temp;
+                true
+            }
+            (InsOp::SBX, PS::Exec0, true ) => { true }
+
+            (InsOp::LAS, PS::Exec0, false) => {
+                self.temp = self.fetched & self.stkpt;
+                self.check_nz_flags(self.temp);
+                self.a = self.temp;
+                self.x = self.temp;
+                self.stkpt = self.temp;
+                true
+            }
+            (InsOp::LAS, PS::Exec0, true ) => { true }
+
+            (InsOp::SHA, PS::Exec0, false) => {
+                self.temp = self.a & self.x;
+                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_rw = false;
+                false
+            }
+            (InsOp::SHA, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHA, PS::Exec1, _) => { true }
+
+            (InsOp::SHX, PS::Exec0, false) => {
+                self.temp = self.x;
+                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_rw = false;
+                false
+            }
+            (InsOp::SHX, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHX, PS::Exec1, _) => { true }
+
+            (InsOp::SHY, PS::Exec0, false) => {
+                self.temp = self.y;
+                *address_bus = Self::instable_store_address(self.temp, self.addr_data);
+                *address_rw = false;
+                false
+            }
+            (InsOp::SHY, PS::Exec0, true ) => { *data_bus = Self::instable_store_value(self.temp, self.addr_data); true }
+            (InsOp::SHY, PS::Exec1, _) => { true }
+
+            (InsOp::TAS, PS::Exec0, false) => { false }
+            (InsOp::TAS, PS::Exec0, true ) => {
+                self.temp = self.a & self.x;
+                self.stkpt = Self::instable_store_value(self.temp, self.addr_data);
+                true
+            }
+            (InsOp::TAS, PS::Exec1, _) => { true }
+
+            (InsOp::ANE, PS::Exec0, false) => {
+                let magic_number = 0xEF; // this is hardcoded but should be completely random or dependant on the RDY line; its recommended to use 0xEE when RDY enabled and 0xFF otherwise
+                self.a = (self.a | magic_number) & self.x & self.fetched;
+                self.check_nz_flags(self.a);
+                true
+            }
+            (InsOp::ANX, PS::Exec0, false) => {
+                let magic_number = 0xEE; // this is hardcoded but should be completely random or dependant on the RDY line; its recommended to use 0xEE
+                self.temp = (self.a | magic_number) & self.fetched;
+                self.a = self.temp;
+                self.x = self.temp;
+                self.check_nz_flags(self.a);
+                true
+            }
+
+            (InsOp::JAM, _, _) => { false } // fuck you, gotta RESET now
+
+
             _ => { false } // Illegal Instruction
         }
     }
@@ -1168,9 +1394,32 @@ impl Cpu {
         temp
     }
     fn compare(&mut self, a: u8, b: u8) {
-        let temp = a.wrapping_sub(b);
-        self.check_nz_flags(temp);
+        self.temp = a.wrapping_sub(b);
+        self.check_nz_flags(self.temp);
         self.set_flag(Flags6502::C, a >= b);
+    }
+    fn add_carry(&mut self, b: u8) {
+        let temp = self.a as u16 + b as u16 + self.get_flag(Flags6502::C) as u16;
+
+        self.check_nzc_flags(temp);
+        self.set_flag(
+            Flags6502::V,
+            ((!(self.a as u16 ^ b as u16) & (self.a as u16 ^ temp)) & 0x0080) > 0,
+        );
+        self.a = lo_byte(temp);
+    }
+
+    fn instable_store_value(value: u8, address: u16) -> u8 {
+        let dmad = false;
+        let hi_byte = hi_byte(address);
+        if !dmad { hi_byte.wrapping_add(1) & value } else { value }
+    }
+    fn instable_store_address(value: u8, mut address: u16) -> u16 {
+        let page_crossed = false;
+        let hi_byte = hi_byte(address);
+        let hi_byte = if page_crossed { hi_byte.wrapping_add(1) & value } else { hi_byte };
+        set_hi_byte(&mut address, hi_byte);
+        address
     }
 }
 
