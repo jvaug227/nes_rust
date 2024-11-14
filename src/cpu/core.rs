@@ -182,57 +182,45 @@ pub mod InstructionAddressingModes {
 /// bytecode is layed out as [a2 a1 a0 b2 b1 b0 c1 c0]
 /// a, b, and c have no direct meaning
 /// Needs to be profiled
-pub fn bytecode_to_addrmode(x: u8) -> u8 {
-    let c0 = (0b00000001 & x) > 0;
-    let c1 = (0b00000010 & x) > 0;
-    let b0 = (0b00000100 & x) > 0;
-    let b1 = (0b00001000 & x) > 0;
-    let b2 = (0b00010000 & x) > 0;
-    let a0 = (0b00100000 & x) > 0;
-    let a1 = (0b01000000 & x) > 0;
-    let a2 = (0b10000000 & x) > 0;
-
-    let a = x >> 5;
-    let b = (x & 0b00011100) >> 2;
-    let c = x & 0b00000011;
-
-    use InstructionAddressingModes as A;
-    let general_addrmodes = [
-        [A::IMP, A::IND_X],
-        [A::ZP, A::ZP],
-        [A::IMP, A::IMM],
-        [A::ABS, A::ABS],
-        [A::REL, A::IND_Y],
-        [A::ZP_X, A::ZP_X],
-        [A::IMP, A::ABS_Y],
-        [A::ABS_X, A::ABS_X],
-    ];
-
-    let mut addrmode =
-        general_addrmodes[b as usize][c0 as usize];
-
-    let l0 = (!c0 & a2 & (b == 0)) as u8 * 2; // IMP -> IMM
-    let l1 = ((c == 2) & (b == 2) & !a2) as u8; // IMP -> ACC
-    let l2 = (c1 & ((b == 5) | (b == 7)) & ((a == 4) | (a == 5))) as u8; // zp/abs X -> Y
-    let l3 = (x == 0x20) as u8 * 7; // IMP -> ABS
-    let l4 = (x  == 0x6C) as u8 * 3; // ABS -> IND
-
-    addrmode += l0 + l1 + l2 + l3 + l4;
-
-    addrmode
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct CpuLog {
-    pub count_bytes: u8,
-    pub byte0: u8,
-    pub byte1: u8,
-    pub byte2: u8,
-    pub start_address: u16,
-    pub opcode: u8,
-    pub addrmode: u8,
-    pub start_cycle: usize,
-}
+// pub fn bytecode_to_addrmode(x: u8) -> u8 {
+//     let c0 = (0b00000001 & x) > 0;
+//     let c1 = (0b00000010 & x) > 0;
+//     let b0 = (0b00000100 & x) > 0;
+//     let b1 = (0b00001000 & x) > 0;
+//     let b2 = (0b00010000 & x) > 0;
+//     let a0 = (0b00100000 & x) > 0;
+//     let a1 = (0b01000000 & x) > 0;
+//     let a2 = (0b10000000 & x) > 0;
+//
+//     let a = x >> 5;
+//     let b = (x & 0b00011100) >> 2;
+//     let c = x & 0b00000011;
+//
+//     use InstructionAddressingModes as A;
+//     let general_addrmodes = [
+//         [A::IMP, A::IND_X],
+//         [A::ZP, A::ZP],
+//         [A::IMP, A::IMM],
+//         [A::ABS, A::ABS],
+//         [A::REL, A::IND_Y],
+//         [A::ZP_X, A::ZP_X],
+//         [A::IMP, A::ABS_Y],
+//         [A::ABS_X, A::ABS_X],
+//     ];
+//
+//     let mut addrmode =
+//         general_addrmodes[b as usize][c0 as usize];
+//
+//     let l0 = (!c0 & a2 & (b == 0)) as u8 * 2; // IMP -> IMM
+//     let l1 = ((c == 2) & (b == 2) & !a2) as u8; // IMP -> ACC
+//     let l2 = (c1 & ((b == 5) | (b == 7)) & ((a == 4) | (a == 5))) as u8; // zp/abs X -> Y
+//     let l3 = (x == 0x20) as u8 * 7; // IMP -> ABS
+//     let l4 = (x  == 0x6C) as u8 * 3; // ABS -> IND
+//
+//     addrmode += l0 + l1 + l2 + l3 + l4;
+//
+//     addrmode
+// }
 
 #[derive(Copy, Clone)]
 pub struct Cpu {
@@ -255,7 +243,6 @@ pub struct Cpu {
     pub addr_data: u16,
 
     pub opcode: u8,
-    pub cycles: usize,
 
 }
 

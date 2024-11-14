@@ -1,4 +1,4 @@
-use super::CpuLog;
+use super::{CpuLog, InstructionOperations};
 
 #[derive(Clone, Copy)]
 pub struct Instruction {
@@ -463,6 +463,32 @@ pub fn opcode_to_str(opcode: u8) -> &'static str {
         0x35 => { "TXA" },
         0x36 => { "TXS" },
         0x37 => { "TYA" },
+
+        0x38 => { "SLO" },
+        0x39 => { "RLA" },
+        0x3A => { "SRE" },
+        0x3B => { "RRA" },
+        0x3C => { "SAX" },
+        0x3D => { "LAX" },
+        0x3E => { "DCP" },
+        0x3F => { "ISC" },
+        0x40 => { "ANC" },
+        0x41 => { "ALR" },
+        0x42 => { "ARR" },
+        0x43 => { "SBX" },
+        0x44 => { "SHA" },
+        0x45 => { "SHY" },
+        0x46 => { "SHX" },
+        0x47 => { "TAS" },
+        0x48 => { "LAS" },
+        0x49 => { "ANE" },
+        0x50 => { "ANX" },
+        0x51 => { "JAM" },
         _ => { "XXX" },
     }
+}
+
+pub fn is_unofficial_instruction(instruction: &Instruction, index: u8) -> bool {
+    let op = instruction.op();
+    (0x38..0x52).contains(&op) || (op == InstructionOperations::NOP && index != 0xEA) || (index == 0xEB)
 }

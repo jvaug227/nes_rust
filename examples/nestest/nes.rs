@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use nes_rust::cpu::{instructions::{lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, InstructionAddressingModes};
+use nes_rust::cpu::{instructions::{is_unofficial_instruction, lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, InstructionAddressingModes};
 
 
 pub struct NESBoard {
@@ -13,6 +13,8 @@ pub struct NESBoard {
     addr_rw: bool,
     addr_bus: u16,
     data_bus: u8,
+    cycles: usize,
+    start_cycle: usize,
 }
 
 impl NESBoard {
@@ -20,7 +22,8 @@ impl NESBoard {
         let debug_buffer = b"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX\n".to_vec();
         let mut cpu_copy = cpu;
         cpu_copy.pc -= 1;
-        NESBoard { ram, cpu, cpu_copy, debug_buffer, addr_rw: true, addr_bus: 0, data_bus: 0, debug_ram_access: [0; 7], debug_ram_count: 0 }
+        let cycles = cpu_copy.cycles;
+        NESBoard { ram, cpu, cpu_copy, debug_buffer, addr_rw: true, addr_bus: 0, data_bus: 0, debug_ram_access: [0; 7], debug_ram_count: 0, cycles, start_cycle: cycles }
     }
 
     // Emulate one master clok cycle
@@ -34,12 +37,14 @@ impl NESBoard {
         if self.cpu.clock(&mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true) {
             self.print_log();
             self.cpu_copy = self.cpu; // update the copy
+            self.start_cycle = self.cycles+1;
             self.cpu_copy.pc -= 1; // pc increments before we can copy it
         }
         if !self.addr_rw {
             let addr = self.addr_bus as usize;
             self.ram[addr] = self.data_bus;
         }
+        self.cycles = self.cycles.wrapping_add(1);
     }
 
     pub fn cpu(&self) -> &Cpu {
@@ -192,7 +197,7 @@ impl NESBoard {
         let instruction = &LOOKUP_TABLE[self.cpu_copy.opcode as usize];
         let opcode_count = if self.debug_ram_count == 0 { 0 } else { self.debug_ram_count - 1 };
         // let ins_str: String = stringify_ins_from_log(&self.cpu_copy);
-        let cycles: usize = self.cpu_copy.cycles;
+        let cycles: usize = self.start_cycle;
         let ppucycles = cycles * 3;
         let ppu1: usize = ppucycles / 340;
         let ppu2: usize = ppucycles % 340;
@@ -204,6 +209,7 @@ impl NESBoard {
         Self::write_hex_to_buffer(self.cpu_copy.opcode as u16, buffer, 6, 2);
         if opcode_count == 1 || opcode_count == 2 { Self::write_hex_to_buffer(byte1 as u16, buffer, 9, 2); } else { Self::write_spaces(buffer, 9, 11); }
         if opcode_count == 2 { Self::write_hex_to_buffer(byte2 as u16, buffer, 12, 2); } else { Self::write_spaces(buffer, 12, 14); }
+        buffer[15] = if is_unofficial_instruction(instruction, self.cpu_copy.opcode) { b'*' } else { b' ' };
         Self::write_assembly_string(instruction, &self.debug_ram_access, buffer, 16, 46, self.cpu_copy.pc);
         Self::write_hex_to_buffer(self.cpu_copy.a as u16, buffer, 50, 2);
         Self::write_hex_to_buffer(self.cpu_copy.x as u16, buffer, 55, 2);
