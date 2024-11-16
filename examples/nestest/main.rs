@@ -21,11 +21,11 @@ fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
             let end = row_addr + cols;
             //let byte_vec: Vec<u8> = vec![];
             let a = &ram[row_addr..end];
-            
+
             ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, a));
         }
     });
-    
+
 }
 
 fn draw_cpu_flag(ui: &mut Ui, flag: Flags6502, cpu: &Cpu) {
@@ -33,7 +33,7 @@ fn draw_cpu_flag(ui: &mut Ui, flag: Flags6502, cpu: &Cpu) {
 }
 
 fn draw_cpu(ui: & mut Ui, cpu: &Cpu) {
-    
+
     ui.label("Status:");
     ui.horizontal(|ui: &mut Ui| {
         let flags = [Flags6502::C, Flags6502::Z, Flags6502::I, Flags6502::D, Flags6502::B, Flags6502::U, Flags6502::V, Flags6502::N];
@@ -54,7 +54,7 @@ fn draw_cpu(ui: & mut Ui, cpu: &Cpu) {
         ui.label(RichText::new(&format!("Opcode: ${:#x}", cpu.opcode)));
         ui.label(RichText::new(&format!("Pipeline Status: ${:#x?}", cpu.pipeline_status)));
     });
-    
+
 }
 
 struct Gpu {
@@ -146,13 +146,13 @@ impl App {
         };
 
         let (device, queue) = adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    required_features: wgpu::Features::default(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                },
-                None,
+            &wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::default(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+            },
+            None,
         ).await?;
 
         let mut size = window.inner_size();
@@ -264,88 +264,89 @@ impl App {
 
         fn window_event(
             &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        _window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
-    ) {
-        if let (Some(egui), Some(gpu)) = (self.egui.as_mut(), self.gpu.as_ref()) {
-            let resp = egui.state.on_window_event(&gpu.window, &event);
-            if resp.repaint { gpu.window.request_redraw(); }
-            if resp.consumed { return; }
-        }
+            event_loop: &winit::event_loop::ActiveEventLoop,
+            _window_id: winit::window::WindowId,
+            event: winit::event::WindowEvent,
+        ) {
+            if let (Some(egui), Some(gpu)) = (self.egui.as_mut(), self.gpu.as_ref()) {
+                let resp = egui.state.on_window_event(&gpu.window, &event);
+                if resp.repaint { gpu.window.request_redraw(); }
+                if resp.consumed { return; }
+            }
 
-        match event {
-            WindowEvent::CloseRequested => { event_loop.exit(); },
-            WindowEvent::RedrawRequested => {
-                match self.draw() {
-                    Ok(_) => {},
-                    Err(e) => { eprintln!("Error: {e}"); }
-                };
-                let current_time = std::time::Instant::now();
-                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
-                    self.last_time = current_time;
-                    self.nes.clock();
-                    self.nes.clock();
-                    self.nes.clock();
-                }
-            },
-            WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize( width, height );
-                }
-            },
-            WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
-                if event.repeat { return; }
-                if event.state != ElementState::Pressed { return; }
-                match event.key_without_modifiers().as_ref() {
-                    Key::Character(s) => {
-                        match s {
-                            "r" => { self.nes.reset(); },
-                            "i" => { self.nes.irq(); },
-                            "n" => { self.nes.nmi(); },
-                            "p" => if !self.clock_cpu { self.nes.clock(); },
-                            _ => {}
-                        }
+            match event {
+                WindowEvent::CloseRequested => { event_loop.exit(); },
+                WindowEvent::RedrawRequested => {
+                    match self.draw() {
+                        Ok(_) => {},
+                        Err(e) => { eprintln!("Error: {e}"); }
+                    };
+                    let current_time = std::time::Instant::now();
+                    if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
+                        self.last_time = current_time;
+                        let ready = false;
+                        self.nes.clock(ready);
+                        self.nes.clock(ready);
+                        self.nes.clock(ready);
                     }
-                    Key::Named(n) => {
-                        if n == NamedKey::Space {
-                            self.clock_cpu = !self.clock_cpu;
+                },
+                WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
+                    if let Some(gpu) = &mut self.gpu {
+                        gpu.resize( width, height );
+                    }
+                },
+                WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
+                    if event.repeat { return; }
+                    if event.state != ElementState::Pressed { return; }
+                    match event.key_without_modifiers().as_ref() {
+                        Key::Character(s) => {
+                            match s {
+                                "r" => { self.nes.reset(); },
+                                "i" => { self.nes.irq(); },
+                                "n" => { self.nes.nmi(); },
+                                "p" => if !self.clock_cpu { self.nes.clock(false); },
+                                _ => {}
+                            }
                         }
-                    },
-                    _ => {},
-                }
+                        Key::Named(n) => {
+                            if n == NamedKey::Space {
+                                self.clock_cpu = !self.clock_cpu;
+                            }
+                        },
+                        _ => {},
+                    }
 
-            },
-            _ => {}
+                },
+                _ => {}
+
+            }
 
         }
-
     }
-}
 
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let event_loop = EventLoop::new()?;
+    fn main() -> Result<(), Box<dyn Error>> {
+        let event_loop = EventLoop::new()?;
 
-    let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
 
-    //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
-    //let program = include_bytes!("official_only.nes");
-    let program = include_bytes!("nestest.nes");
-    let cartridge_data = CartridgeData::decode(program);
-    // println!("Read Catridge: (Maybe Named) {:?}", cartridge_data.title);
-    // println!("Program is {} bytes", program.len());
-    // println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
-    // println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
-    // println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
+        //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
+        //let program = include_bytes!("official_only.nes");
+        let program = include_bytes!("nestest.nes");
+        let cartridge_data = CartridgeData::decode(program);
+        println!("Read Catridge: (Maybe Named) {:?}", cartridge_data.title);
+        println!("Program is {} bytes", program.len());
+        println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
+        println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
+        println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
 
-    const RAM_SIZE: usize = 256 * 2048;
-    const PROGRAM_RANGE: usize = 32768;
-    let mut ram = vec![0u8; RAM_SIZE];
-    let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
-    let mirror_length = cartridge_data.prg_rom_range.len();
-    // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
-    if mirror_count > 1 {
+        const RAM_SIZE: usize = 256 * 2048;
+        const PROGRAM_RANGE: usize = 32768;
+        let mut ram = vec![0u8; RAM_SIZE];
+        let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
+        let mirror_length = cartridge_data.prg_rom_range.len();
+        // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
+        if mirror_count > 1 {
         let program_range = &program[cartridge_data.prg_rom_range.clone()];
         // println!("Needs to mirror");
         for i in 0..mirror_count {
@@ -360,17 +361,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // cpu.bus_mut().ram[0xFFFA] = 0x00;
     // cpu.bus_mut().ram[0xFFFB] = 0x80;
-    // cpu.bus_mut().ram[0xFFFC] = 0x00;
-    // cpu.bus_mut().ram[0xFFFD] = 0x80;
+    ram[0xFFFC] = 0x00;
+    ram[0xFFFD] = 0xC0;
     // cpu.bus_mut().ram[0xFFFE] = 0x00;
     // cpu.bus_mut().ram[0xFFFF] = 0x80;
-    cpu.reset();
-    cpu.pc = 0xC001;
-    let a = ram[0xC000];
-    cpu.opcode = a;
-    cpu.cycles = 7;
-    cpu.stkpt = 0xFD;
-    cpu.set_flags(Flags6502::I | Flags6502::U);
+    // cpu.reset();
+    // cpu.pc = 0xC001;
+    // let a = ram[0xC000];
+    // cpu.opcode = a;
+    // cpu.stkpt = 0xFD;
+    // cpu.set_flags(Flags6502::I | Flags6502::U);
 
     let mut app = App::new(cpu, ram);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

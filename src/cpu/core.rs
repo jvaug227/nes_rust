@@ -1,7 +1,9 @@
-use bitflags::bitflags;
+use bitflags::{bitflags, Flags};
 use std::fmt;
 
-use super::instructions::lookup;
+use crate::cpu::instructions::InstructionKind;
+
+use super::instructions::{lookup, Instruction};
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -222,6 +224,62 @@ pub mod InstructionAddressingModes {
 //     addrmode
 // }
 
+
+#[derive(Clone, Copy, Debug)]
+pub enum PipelineStatus {
+    IR,
+    Addr0,
+    Addr1,
+    Addr2,
+    Addr3,
+    Addr4,
+    Addr5,
+    Exec0,
+    Exec1,
+    Exec2,
+    Exec3,
+    Exec4,
+    Exec5,
+    Exec6,
+}
+
+impl PipelineStatus {
+    pub fn advance(&mut self) {
+        *self = match self {
+            Self::IR => Self::Addr0,
+            Self::Addr0 => Self::Addr1,
+            Self::Addr1 => Self::Addr2,
+            Self::Addr2 => Self::Addr3,
+            Self::Addr3 => Self::Addr4,
+            Self::Addr4 => Self::Addr5,
+            Self::Addr5 => Self::Exec0,
+            Self::Exec0 => Self::Exec1,
+            Self::Exec1 => Self::Exec2,
+            Self::Exec2 => Self::Exec3,
+            Self::Exec3 => Self::Exec4,
+            Self::Exec4 => Self::Exec5,
+            Self::Exec5 => Self::Exec6,
+            Self::Exec6 => Self::IR,
+        }
+    }
+}
+
+pub fn lo_byte(word: u16) -> u8 {
+    word as u8 // gets truncated
+}
+
+pub fn hi_byte(word: u16) -> u8 {
+    (word >> 8) as u8 // gets truncated
+}
+
+fn set_lo_byte(word: &mut u16, byte: u8) {
+    *word = (*word & 0xFF00) | u16::from(byte);
+}
+
+fn set_hi_byte(word: &mut u16, byte: u8) {
+    *word = (*word & 0x00FF) | (u16::from(byte) << 8);
+}
+
 #[derive(Copy, Clone)]
 pub struct Cpu {
     // Registers
@@ -244,61 +302,10 @@ pub struct Cpu {
 
     pub opcode: u8,
 
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum PipelineStatus {
-    Addr0,
-    Addr1,
-    Addr2,
-    Addr3,
-    Addr4,
-    Addr5,
-    Exec0,
-    Exec1,
-    Exec2,
-    Exec3,
-    Exec4,
-    Exec5,
-    Exec6,
-    IR,
-}
-
-impl PipelineStatus {
-    pub fn advance(&mut self) {
-        *self = match self {
-            Self::Addr0 => Self::Addr1,
-            Self::Addr1 => Self::Addr2,
-            Self::Addr2 => Self::Addr3,
-            Self::Addr3 => Self::Addr4,
-            Self::Addr4 => Self::Addr5,
-            Self::Addr5 => Self::Exec0,
-            Self::Exec0 => Self::Exec1,
-            Self::Exec1 => Self::Exec2,
-            Self::Exec2 => Self::Exec3,
-            Self::Exec3 => Self::Exec4,
-            Self::Exec4 => Self::Exec5,
-            Self::Exec5 => Self::Exec6,
-            Self::Exec6 => Self::IR,
-            Self::IR => Self::Addr0,
-        }
-    }
-}
-
-pub fn lo_byte(word: u16) -> u8 {
-    word as u8 // gets truncated
-}
-
-pub fn hi_byte(word: u16) -> u8 {
-    (word >> 8) as u8 // gets truncated
-}
-
-fn set_lo_byte(word: &mut u16, byte: u8) {
-    *word = (*word & 0xFF00) | u16::from(byte);
-}
-
-fn set_hi_byte(word: &mut u16, byte: u8) {
-    *word = (*word & 0x00FF) | (u16::from(byte) << 8);
+    queue_irq: bool,
+    queue_nmi: bool,
+    queue_reset: bool,
+    previous_nmi: bool,
 }
 
 #[allow(non_snake_case)]
@@ -310,8 +317,8 @@ impl Cpu {
             y: 0,
             stkpt: 0,
             pc: 0,
-            status: Flags6502::empty(),
-            pipeline_status: PipelineStatus::Addr0,
+            status: Flags6502::U,
+            pipeline_status: PipelineStatus::Exec0,
             page_boundary_crossed: false,
             did_page_break_this_instruction: false,
             internal_carry: false,
@@ -319,20 +326,56 @@ impl Cpu {
             temp: 0,
             addr_data: 0,
             opcode: 0,
-            cycles: 0,
+
+            queue_irq: false,
+            queue_nmi: false,
+            queue_reset: false,
+            previous_nmi: false,
         }
+    }
+
+    fn suppresses_pc_increment(&self) -> bool {
+        self.queue_irq || self.queue_nmi || self.queue_reset
+    }
+    fn reset_suppresses_stack(&self) -> bool {
+        self.queue_reset
+    }
+    fn do_hardware_interrupt(&self) -> bool {
+        self.queue_irq || self.queue_nmi || self.queue_reset
+    }
+    fn handle_inturrupt_pins(&mut self, reset: bool, nmi: bool, irq: bool) {
+        // edge-detect high->low
+        // if previous nmi was high and current nmi is low
+        if self.previous_nmi && !nmi {
+            self.queue_nmi = true;
+        }
+        // set irq on low signal
+        // ignore irq if I flag is set
+        if !irq && !self.get_flag(Flags6502::C) {
+            self.queue_irq = true;
+        }
+        
+        // set reset on low signal
+        // TODO: I have to determine if RESET abides by the I Flag
+        if !reset {
+            self.queue_reset = true;
+        }
+
+        self.previous_nmi = nmi;
     }
 
 
     // Perform one instruction worth of emulation
-    pub fn clock(&mut self, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
-        self.cycles = self.cycles.wrapping_add(phi as usize);
+    #[allow(clippy::too_many_arguments)]
+    pub fn clock(&mut self, ready: bool, reset: bool, nmi: bool, irq: bool, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         let instruction = lookup::LOOKUP_TABLE[self.opcode as usize];
-        
-        self.execute(instruction.op(), instruction.addrmode(), address_bus, data_bus, address_rw, phi)
+        self.execute(instruction, ready, reset, nmi, irq, address_bus, data_bus, address_rw, phi)
     }
 
-    fn execute(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn execute(&mut self, instruction: Instruction, ready: bool, reset: bool, nmi: bool, irq: bool, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+
+        self.handle_inturrupt_pins(reset, nmi, irq); 
 
         let mut is_executing_stage = matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Exec6);
         let mut is_ir_stage = matches!(self.pipeline_status, PipelineStatus::IR);
@@ -356,7 +399,7 @@ impl Cpu {
         }
 
         if is_addr_stage {
-            let finished_addressing = self.execute_addrmode(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+            let finished_addressing = self.execute_addrmode(instruction, address_bus, data_bus, address_rw, phi);
             if finished_addressing {
                 self.pipeline_status = PipelineStatus::Exec0;
                 is_executing_stage = !phi;
@@ -369,7 +412,7 @@ impl Cpu {
         }
 
         if is_executing_stage {
-            let finished_executing = self.execute_instruction(opcode, addrmode, address_bus, data_bus, address_rw, phi);
+            let finished_executing = self.execute_instruction(instruction, address_bus, data_bus, address_rw, phi);
             if finished_executing {
                 self.pipeline_status = PipelineStatus::IR;
                 is_ir_stage = !phi;
@@ -388,7 +431,12 @@ impl Cpu {
         if is_ir_stage && phi {
 
             self.opcode = *data_bus;
-            self.pc += 1;
+            if !self.suppresses_pc_increment() {
+                self.pc += 1;
+            }
+            if self.do_hardware_interrupt() {
+                self.opcode = 0;
+            }
             
             self.pipeline_status = PipelineStatus::Addr0;
             self.did_page_break_this_instruction = false;
@@ -401,11 +449,15 @@ impl Cpu {
     /// Returns true if the instruction should immediately begin executing
     /// an instruction  
     /// Returns false if the cpu should wait for a clock cycle
-    fn execute_addrmode(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+    fn execute_addrmode(&mut self, instruction: Instruction, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionAddressingModes as Addr;
         use InstructionOperations as InsOp;
+        let opcode = instruction.op();
+        let addrmode = instruction.addrmode();
         let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
+        let is_rwm = instruction.kind() == InstructionKind::ReadWrite;
         let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY | InsOp::SAX);
+        let is_mw = instruction.kind() == InstructionKind::Write;
         let do_pagebreak_anyways = matches!(opcode, InsOp::STA) || is_rwm;
         
         let skip_read = is_mw;
@@ -568,7 +620,7 @@ impl Cpu {
             (Addr::IDY, PipelineStatus::Addr3, false) => {
                 if do_pagebreak_anyways {
                     // we page breaked and ended up here when we were not supposed to
-                    return true;
+                    // return true;
                 }
                 *address_bus = self.addr_data;
                 *address_rw = true;
@@ -580,24 +632,17 @@ impl Cpu {
         }
     }
 
-    fn execute_instruction(&mut self, opcode: u8, addrmode: u8, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+    fn execute_instruction(&mut self, instruction: Instruction, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
         use InstructionOperations as InsOp;
         use PipelineStatus as PS;
+        let opcode = instruction.op();
+        let addrmode = instruction.addrmode();
         match (opcode, self.pipeline_status, phi) {
             (InsOp::NOP, _, _) => {
                 true
             },
             // Add with carry
             (InsOp::ADC, PS::Exec0, false) => {
-                // let temp = self.a as u16 + self.fetched as u16 + self.get_flag(Flags6502::C) as u16;
-                //
-                // self.check_nzc_flags(temp);
-                // self.set_flag(
-                //     Flags6502::V,
-                //     ((!(self.a as u16 ^ self.fetched as u16) & (self.a as u16 ^ temp)) & 0x0080)
-                //         > 0,
-                // );
-                // self.a = (temp & 0x00FF) as u8;
                 self.add_carry(self.fetched);
                 true
             }
@@ -629,37 +674,21 @@ impl Cpu {
             (InsOp::ASL, PS::Exec2, _) => { true }
 
             // Branch if Carry Clear
-            (InsOp::BCC, PS::Exec0, false) => {
-                self.branch(!self.get_flag(Flags6502::C))
-            }
+            (InsOp::BCC, PS::Exec0, false) => { self.branch(!self.get_flag(Flags6502::C)) }
             // Branch is Carry Set
-            (InsOp::BCS, PS::Exec0, false) => {
-                self.branch(self.get_flag(Flags6502::C))
-            }
+            (InsOp::BCS, PS::Exec0, false) => { self.branch(self.get_flag(Flags6502::C)) }
             // Branch if Equal (Branch if Zero Set)
-            (InsOp::BEQ, PS::Exec0, false) => {
-                self.branch(self.get_flag(Flags6502::Z))
-            }
+            (InsOp::BEQ, PS::Exec0, false) => { self.branch(self.get_flag(Flags6502::Z)) }
             // Branch if Minus (Branch if Negative Flag Set)
-            (InsOp::BMI, PS::Exec0, false) => {
-                self.branch(self.get_flag(Flags6502::N))
-            }
+            (InsOp::BMI, PS::Exec0, false) => { self.branch(self.get_flag(Flags6502::N)) }
             // Branch if Not Equal (Branch if Zero Clear)
-            (InsOp::BNE, PS::Exec0, false) => {
-                self.branch(!self.get_flag(Flags6502::Z))
-            }
+            (InsOp::BNE, PS::Exec0, false) => { self.branch(!self.get_flag(Flags6502::Z)) }
             // Branch is Positive (Branch if Negative Clear)
-            (InsOp::BPL, PS::Exec0, false) => {
-                self.branch(!self.get_flag(Flags6502::N))
-            }
+            (InsOp::BPL, PS::Exec0, false) => { self.branch(!self.get_flag(Flags6502::N)) }
             // Branch if Overflow Clear
-            (InsOp::BVC, PS::Exec0, false) => {
-                self.branch(!self.get_flag(Flags6502::V))
-            }
+            (InsOp::BVC, PS::Exec0, false) => { self.branch(!self.get_flag(Flags6502::V)) }
             // Branch if Overflow Set
-            (InsOp::BVS, PS::Exec0, false) => {
-                self.branch(self.get_flag(Flags6502::V))
-            }
+            (InsOp::BVS, PS::Exec0, false) => { self.branch(self.get_flag(Flags6502::V)) }
             (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec0, true) => { false }
             // Intercpting page-break handler will handle this for us
             (InsOp::BCC | InsOp::BCS | InsOp::BEQ | InsOp::BMI | InsOp::BNE | InsOp::BPL | InsOp::BVC | InsOp::BVS, PS::Exec1, false) => {
@@ -701,13 +730,15 @@ impl Cpu {
             }
             (InsOp::BRK, PS::Exec0, true) => {
                 _ = *data_bus;
-                self.pc = self.pc.wrapping_add(1);
+                if !self.suppresses_pc_increment() {
+                    self.pc = self.pc.wrapping_add(1);
+                }
                 false
             }
             (InsOp::BRK, PS::Exec1, false) => {
                 self.fetched = hi_byte(self.pc);
                 *address_bus = 0x0100 + (self.stkpt as u16);
-                *address_rw = false;
+                *address_rw = self.reset_suppresses_stack();
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
@@ -715,24 +746,53 @@ impl Cpu {
             (InsOp::BRK, PS::Exec2, false) => {
                 self.fetched = lo_byte(self.pc);
                 *address_bus = 0x0100 + (self.stkpt as u16);
-                *address_rw = false;
+                *address_rw = self.reset_suppresses_stack();
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 false
             },
             (InsOp::BRK, PS::Exec2, true) => { *data_bus = self.fetched; false}
             (InsOp::BRK, PS::Exec3, false) => {
-                self.fetched = (self.status | Flags6502::B | Flags6502::U).bits();
+                // If this was a hardware inturrupt, don't set b flag
+                let b_flag = if self.do_hardware_interrupt() { Flags6502::empty() } else { Flags6502::B };
+                self.fetched = (self.status | b_flag | Flags6502::U).bits();
                 *address_bus = 0x0100 + (self.stkpt as u16);
-                *address_rw = false;
+                *address_rw = self.reset_suppresses_stack();
                 self.stkpt = self.stkpt.wrapping_sub(1);
                 self.set_flag(Flags6502::I, true);
                 false
             },
             (InsOp::BRK, PS::Exec3, true) => { *data_bus = self.fetched; false }
-            (InsOp::BRK, PS::Exec4, false) => { *address_bus = 0xFFFE; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec4, false) => {
+                // This should also re-create the inturrupt vector override bug?
+                const RESET_VECTORS: [u16; 3] = [ 0xFA, 0xFC, 0xFE ];
+                let index = if self.queue_nmi {
+                    self.queue_nmi = false;
+                    0
+                } else if self.queue_reset {
+                    // disable other interrupt requests
+                    // there is no explicit documentation on whether
+                    // RESET clears these indicators, but this is how
+                    // I will make the startup sequence work
+                    self.queue_reset = false;
+                    self.queue_nmi = false;
+                    self.queue_irq = false;
+                    1
+                } else {
+                    self.queue_irq = false;
+                    2
+                };
+                self.addr_data = 0xFF00 | RESET_VECTORS[index];
+                *address_bus = self.addr_data;
+                *address_rw = true;
+                self.addr_data = self.addr_data.wrapping_add(1);
+                false
+            },
             (InsOp::BRK, PS::Exec4, true) => { set_lo_byte(&mut self.pc, *data_bus); false }
-            (InsOp::BRK, PS::Exec5, false) => { *address_bus = 0xFFFF; *address_rw = true; false },
-            (InsOp::BRK, PS::Exec5, true) => { set_hi_byte(&mut self.pc, *data_bus); false },
+            (InsOp::BRK, PS::Exec5, false) => { *address_bus = self.addr_data; *address_rw = true; false },
+            (InsOp::BRK, PS::Exec5, true) => {
+                set_hi_byte(&mut self.pc, *data_bus);
+                false
+            },
             (InsOp::BRK, PS::Exec6, _) => { true },
             // Clear Carry Flag
             (InsOp::CLC, PS::Exec0, _) => { self.set_flag(Flags6502::C, false); true }

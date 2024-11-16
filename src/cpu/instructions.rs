@@ -1,17 +1,29 @@
-use super::{CpuLog, InstructionOperations};
+use super::InstructionOperations;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InstructionKind {
+    // Instruction does not address a value in memory
+    Internal,
+    // Instruction reads a byte from memory and modifies internal state
+    Read,
+    // Instruction reads a bute from memory, modifies internal state, then writes new value back to
+    // memory. These instructions also incur a dummy read
+    ReadWrite,
+    // Instruction writes a byte to memory
+    Write,
+}
 
 #[derive(Clone, Copy)]
 pub struct Instruction {
     operate: u8,
     addrmode: u8,
+    kind: InstructionKind
 }
 
 impl Instruction {
-    pub const fn new(
-                operate: u8,
-                addrmode: u8,
-                ) -> Self {
-        Self { operate, addrmode }
+    pub const fn new( operate: u8, addrmode: u8,) -> Self {
+        let kind = opcode_to_kind(operate);
+        Self { operate, addrmode, kind }
     }
 
     pub fn op(&self) -> u8 {
@@ -21,8 +33,11 @@ impl Instruction {
     pub fn addrmode(&self) -> u8 {
         self.addrmode
     }
-}
 
+    pub fn kind(&self) -> InstructionKind {
+        self.kind
+    }
+}
 
 pub mod lookup { 
         use crate::cpu::InstructionAddressingModes as A;
@@ -392,19 +407,6 @@ pub mod Instructions {
     pub const TYA_IMP: u8   = 0x98;     // 2
 }
 
-pub fn stringify_ins_from_log(log: &CpuLog) -> String {
-    let ins_name = opcode_to_str(log.opcode);
-    let addr_name = "$";
-    let has_read_value = false;
-    let read_value = "0";
-
-    if has_read_value {
-        format!("{ins_name} {addr_name} = {read_value}")
-    } else {
-        format!("{ins_name} {addr_name}")
-    }
-}
-
 pub fn opcode_to_str(opcode: u8) -> &'static str {
     match opcode {
         0x00 => { "NOP" },
@@ -491,4 +493,88 @@ pub fn opcode_to_str(opcode: u8) -> &'static str {
 pub fn is_unofficial_instruction(instruction: &Instruction, index: u8) -> bool {
     let op = instruction.op();
     (0x38..0x52).contains(&op) || (op == InstructionOperations::NOP && index != 0xEA) || (index == 0xEB)
+}
+
+const fn opcode_to_kind(opcode: u8) -> InstructionKind {
+    use InstructionKind::*;
+    match opcode {
+        0x00 => { Internal },   // NOP
+        0x01 => { Read },       // LDA
+        0x02 => { Read },       // LDX
+        0x03 => { Read },       // LDY
+        0x04 => { Read },       // ADC
+        0x05 => { Read },       // AND
+        0x06 => { ReadWrite },  // ASL
+        0x07 => { Read },       // BCC
+        0x08 => { Read },       // BCS
+        0x09 => { Read },       // BEQ
+        0x0A => { Read },       // BIT
+        0x0B => { Read },       // BMI
+        0x0C => { Read },       // BNE
+        0x0D => { Read },       // BPL
+        0x0E => { Read },       // BRK
+        0x0F => { Read },       // BVC
+        0x10 => { Read },       // BVS
+        0x11 => { Internal },   // CLC
+        0x12 => { Internal },   // CLD
+        0x13 => { Internal },   // CLI
+        0x14 => { Internal },   // CLV
+        0x15 => { Read },       // CMP
+        0x16 => { Read },       // CPX
+        0x17 => { Read },       // CPY
+        0x18 => { ReadWrite },  // DEC
+        0x19 => { Internal },   // DEX
+        0x1A => { Internal },   // DEY
+        0x1B => { Read },       // EOR
+        0x1C => { ReadWrite },  // INC
+        0x1D => { Internal },   // INX
+        0x1E => { Internal },   // INY
+        0x1F => { Internal },   // JMP
+        0x20 => { Internal },   // JSR
+        0x21 => { ReadWrite },  // LSR
+        0x22 => { Read },       // ORA
+        0x23 => { Internal },   // PHA
+        0x24 => { Internal },   // PHP
+        0x25 => { Internal },   // PLA
+        0x26 => { Internal },   // PLP
+        0x27 => { ReadWrite },  // ROL
+        0x28 => { ReadWrite },  // ROR
+        0x29 => { Internal },   // RTI
+        0x2A => { Internal },   // RTS
+        0x2B => { Read },       // SBC
+        0x2C => { Internal },   // SEC
+        0x2D => { Internal },   // SED
+        0x2E => { Internal },   // SEI
+        0x2F => { Write },      // STA
+        0x30 => { Write },      // STX
+        0x31 => { Write },      // STY
+        0x32 => { Internal },   // TAX
+        0x33 => { Internal },   // TAY
+        0x34 => { Internal },   // TSX
+        0x35 => { Internal },   // TXA
+        0x36 => { Internal },   // TXS
+        0x37 => { Internal },   // TYA
+
+        0x38 => { ReadWrite },  // SLO*
+        0x39 => { ReadWrite },  // RLA*
+        0x3A => { ReadWrite },  // SRE*
+        0x3B => { ReadWrite },  // RRA*
+        0x3C => { Write },      // SAX
+        0x3D => { Read },       // LAX
+        0x3E => { ReadWrite },  // DCP*
+        0x3F => { ReadWrite },  // ISC*
+        0x40 => { Read },       // ANC
+        0x41 => { Read },       // ALR
+        0x42 => { Read },       // ARR
+        0x43 => { Read },       // SBX
+        0x44 => { Write },      // SHA
+        0x45 => { Write },      // SHY
+        0x46 => { Write },      // SHX
+        0x47 => { Write },      // TAS
+        0x48 => { Read },       // LAS
+        0x49 => { Read },       // ANE
+        0x50 => { Read },       // ANX
+        0x51 => { Internal },   // JAM
+        _ => { Internal },
+    }
 }
