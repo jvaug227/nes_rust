@@ -1,4 +1,4 @@
-use bitflags::{bitflags, Flags};
+use bitflags::bitflags;
 use std::fmt;
 
 use crate::cpu::instructions::InstructionKind;
@@ -438,7 +438,7 @@ impl Cpu {
                 self.page_boundary_crossed = false;
                 self.internal_carry = false;
             }
-            return true;
+            return phi;
         }
 
         if is_addr_stage {
@@ -467,7 +467,7 @@ impl Cpu {
             *address_bus = self.pc;
             *address_rw = true;
             *sync = true;
-            return true;
+            return false;
         }
 
         if is_ir_stage && phi {
@@ -486,7 +486,7 @@ impl Cpu {
             return true;
         }
 
-        true
+        phi
     }
 
     /// Returns true if the instruction should immediately begin executing
