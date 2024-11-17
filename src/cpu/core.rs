@@ -227,7 +227,6 @@ pub mod InstructionAddressingModes {
 
 #[derive(Clone, Copy, Debug)]
 pub enum PipelineStatus {
-    IR,
     Addr0,
     Addr1,
     Addr2,
@@ -241,12 +240,12 @@ pub enum PipelineStatus {
     Exec4,
     Exec5,
     Exec6,
+    IR,
 }
 
 impl PipelineStatus {
     pub fn advance(&mut self) {
         *self = match self {
-            Self::IR => Self::Addr0,
             Self::Addr0 => Self::Addr1,
             Self::Addr1 => Self::Addr2,
             Self::Addr2 => Self::Addr3,
@@ -260,6 +259,7 @@ impl PipelineStatus {
             Self::Exec4 => Self::Exec5,
             Self::Exec5 => Self::Exec6,
             Self::Exec6 => Self::IR,
+            Self::IR => Self::Addr0,
         }
     }
 }
@@ -278,6 +278,23 @@ fn set_lo_byte(word: &mut u16, byte: u8) {
 
 fn set_hi_byte(word: &mut u16, byte: u8) {
     *word = (*word & 0x00FF) | (u16::from(byte) << 8);
+}
+
+/// Nicely define the IO of the CPU as a struct
+/// to reduce the clock function header
+pub struct CpuPinout {
+    //User Write, Cpu Read
+    pub phi: bool,
+    pub ready: bool,
+    pub reset: bool,
+    pub nmi: bool,
+    pub irq: bool,
+    // R/W
+    pub data_bus: u8,
+    // User Read, Cpu Write
+    pub address_bus: u16,
+    pub address_rw: bool,
+    pub sync: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -310,6 +327,29 @@ pub struct Cpu {
 
 #[allow(non_snake_case)]
 impl Cpu {
+    
+    pub fn a(&self) -> u8 {
+        self.a
+    }
+    pub fn x(&self) -> u8 {
+        self.x
+    }
+    pub fn y(&self) -> u8 {
+        self.y
+    }
+    pub fn ps_bits(&self) -> u8 {
+        self.get_status().bits()
+    }
+    pub fn ps_flags(&self) -> Flags6502 {
+        self.get_status()
+    }
+    pub fn pc(&self) -> u16 {
+        self.pc
+    }
+    pub fn sp(&self) -> u8 {
+        self.stkpt
+    }
+
     pub fn new() -> Self {
         Self {
             a: 0,
@@ -365,17 +405,21 @@ impl Cpu {
     }
 
 
-    // Perform one instruction worth of emulation
-    #[allow(clippy::too_many_arguments)]
-    pub fn clock(&mut self, ready: bool, reset: bool, nmi: bool, irq: bool, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+    // Perform one cycle worth of emulation
+    // Returns whether the cpu actually performed a cycle
+    // Will return false when cpu is halted
+    // To determine if an instruction was completed during this cycle, 
+    // the SYNC pin can be read for when an new instruction is read
+    pub fn clock(&mut self, pins: &mut CpuPinout) -> bool {
         let instruction = lookup::LOOKUP_TABLE[self.opcode as usize];
-        self.execute(instruction, ready, reset, nmi, irq, address_bus, data_bus, address_rw, phi)
+        self.execute(instruction, pins)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn execute(&mut self, instruction: Instruction, ready: bool, reset: bool, nmi: bool, irq: bool, address_bus: &mut u16, data_bus: &mut u8, address_rw: &mut bool, phi: bool) -> bool {
+    fn execute(&mut self, instruction: Instruction, pins: &mut CpuPinout) -> bool {
+        let CpuPinout { irq, reset, nmi, phi, ready: _, data_bus, address_bus, address_rw, sync } = pins;
+        let phi = *phi;
 
-        self.handle_inturrupt_pins(reset, nmi, irq); 
+        self.handle_inturrupt_pins(*reset, *nmi, *irq); 
 
         let mut is_executing_stage = matches!(self.pipeline_status, PipelineStatus::Exec0 | PipelineStatus::Exec1 | PipelineStatus::Exec2 | PipelineStatus::Exec3 | PipelineStatus::Exec4 | PipelineStatus::Exec5 | PipelineStatus::Exec6);
         let mut is_ir_stage = matches!(self.pipeline_status, PipelineStatus::IR);
@@ -387,15 +431,14 @@ impl Cpu {
             if !phi {
                 *address_bus = self.addr_data;
                 *address_rw = true;
-                return false;
             } else {
                 _ = *data_bus;
                 let hi_byte = hi_byte(self.addr_data).wrapping_add(self.internal_carry as u8);
                 set_hi_byte(&mut self.addr_data, hi_byte);
                 self.page_boundary_crossed = false;
                 self.internal_carry = false;
-                return false;
             }
+            return true;
         }
 
         if is_addr_stage {
@@ -403,11 +446,9 @@ impl Cpu {
             if finished_addressing {
                 self.pipeline_status = PipelineStatus::Exec0;
                 is_executing_stage = !phi;
-            } else {
-                if phi {
-                    self.pipeline_status.advance(); 
-                }
-                return false;
+            } else if phi {
+                self.pipeline_status.advance(); 
+                return true;
             }
         }
 
@@ -418,14 +459,15 @@ impl Cpu {
                 is_ir_stage = !phi;
             } else if phi {
                 self.pipeline_status.advance();
-                return false;
+                return true;
             }
         }
 
         if is_ir_stage && !phi {
             *address_bus = self.pc;
             *address_rw = true;
-            return false;
+            *sync = true;
+            return true;
         }
 
         if is_ir_stage && phi {
@@ -437,13 +479,14 @@ impl Cpu {
             if self.do_hardware_interrupt() {
                 self.opcode = 0;
             }
+            *sync = false;
             
             self.pipeline_status = PipelineStatus::Addr0;
             self.did_page_break_this_instruction = false;
             return true;
         }
 
-        false
+        true
     }
 
     /// Returns true if the instruction should immediately begin executing

@@ -1,20 +1,18 @@
 use std::io::Write;
 
-use nes_rust::cpu::{instructions::{is_unofficial_instruction, lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, InstructionAddressingModes};
+use nes_rust::{cpu::{instructions::{is_unofficial_instruction, lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, CpuPinout, InstructionAddressingModes}, ppu::{Ppu, PpuPinout}};
 
 
 pub struct NESBoard {
     cpu: Cpu,
+    cpu_pins: CpuPinout,
 
-    reset: bool,
-    irq: bool,
-    nmi: bool,
+    ppu: Ppu,
+    ppu_pins: PpuPinout,
+    ppu_data_latch: u8,
 
     debug_buffer: Vec<u8>,
     ram: Vec<u8>,
-    addr_rw: bool,
-    addr_bus: u16,
-    data_bus: u8,
     cycles: usize,
 }
 
@@ -24,46 +22,64 @@ impl NESBoard {
     // reset inturrupt
     pub fn new(cpu: Cpu, ram: Vec<u8>) -> NESBoard {
         let debug_buffer = b"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX\n".to_vec();
-        let cpu_copy = cpu;
         let cycles = 0;
+        let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
+        let ppu = Ppu::new();
+        let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false };
         NESBoard {
             ram,
             cpu,
-            reset: false,
-            irq: false,
-            nmi: false,
+            cpu_pins,
+            ppu,
+            ppu_pins,
+            ppu_data_latch: 0,
             debug_buffer,
-            addr_rw: true,
-            addr_bus: 0,
-            data_bus: 0,
             cycles
         }
     }
 
-    // Emulate one master clok cycle
-    pub fn clock(&mut self, ready: bool) {
-        let reset = self.reset;
-        let nmi = self.nmi;
-        let irq = self.irq;
-        self.cpu.clock(ready, reset, nmi, irq, &mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, false);
-        if self.addr_rw {
-            let addr = self.addr_bus as usize;
-            self.data_bus = self.ram[addr];
+    fn cpu_clock(&mut self, phi: bool) {
+        self.cpu_pins.phi = phi;
+        let cycle_occured = self.cpu.clock(&mut self.cpu_pins);
+        let addr = self.cpu_pins.address_bus as usize;
+        if self.cpu_pins.address_rw {
+            if self.cpu_pins.sync {
+                self.print_log();
+            }
+            self.cpu_pins.data_bus = self.ram[addr];
             // self.push_byte();
+        } else {
+            self.ram[addr] = self.cpu_pins.data_bus;
         }
-        if self.cpu.clock(ready, reset, nmi, irq, &mut self.addr_bus, &mut self.data_bus, &mut self.addr_rw, true) {
-            self.print_log();
+        if cycle_occured {
+            self.cycles = self.cycles.wrapping_add(1);
         }
-        if !self.addr_rw {
-            let addr = self.addr_bus as usize;
-            self.ram[addr] = self.data_bus;
+    }
+
+    fn ppu_clock(&mut self) {
+        self.ppu.clock(&mut self.ppu_pins);
+        self.cpu_pins.nmi = self.ppu_pins.nmi;
+        if self.ppu_pins.ppu_ale {
+            self.ppu_data_latch = self.ppu_pins.ppu_address_data_low;
         }
-        self.cycles = self.cycles.wrapping_add(1);
+    }
+
+    // Emulate one master clok cycle
+    pub fn clock(&mut self, _ready: bool) {
+
+        self.ppu_clock();
+        self.ppu_clock();
+
+        self.cpu_clock(false);
+
+        self.ppu_clock();
+
+        self.cpu_clock(true);
 
         // Reset inturrupt requests
-        self.reset = true;
-        self.irq = true;
-        self.nmi = true;
+        self.cpu_pins.reset = true;
+        self.cpu_pins.irq = true;
+        self.cpu_pins.nmi = true;
     }
 
     pub fn cpu(&self) -> &Cpu {
@@ -74,20 +90,24 @@ impl NESBoard {
         &self.ram
     }
 
-    pub fn reset(&mut self) {
-        self.reset = false;
-    }
-    pub fn irq(&mut self) {
-        self.irq = false;
-    }
-    pub fn nmi(&mut self) {
-        self.nmi = false;
+    pub fn video_memory(&self) -> &[u8] {
+        self.ppu.video_data()
     }
 
-    fn push_byte(&mut self) {
+    pub fn reset(&mut self) {
+        self.cpu_pins.reset = false;
+    }
+    pub fn irq(&mut self) {
+        self.cpu_pins.irq = false;
+    }
+    pub fn nmi(&mut self) {
+        self.cpu_pins.nmi = false;
+    }
+
+    // fn push_byte(&mut self) {
         // self.debug_ram_access[self.debug_ram_count] = self.data_bus;
         // self.debug_ram_count += 1;
-    }
+    // }
 
     fn write_hex_to_buffer(mut value: u16, buffer: &mut [u8], start: usize, digits: usize) {
         for digit in (0..digits).rev() {
@@ -121,7 +141,7 @@ impl NESBoard {
 
     fn write_assembly_string(instruction: &Instruction, bytes: &[u8], buffer: &mut [u8], mut start: usize, pad_to: usize, pc: u16) {
         let ins_name = opcode_to_str(instruction.op()).as_bytes();
-        buffer[start+0] = ins_name[0];
+        buffer[start  ] = ins_name[0];
         buffer[start+1] = ins_name[1];
         buffer[start+2] = ins_name[2];
         buffer[start+3] = b' ';
@@ -211,8 +231,8 @@ impl NESBoard {
     }
 
     fn print_log(&mut self) {
-        let pc = self.cpu.pc - 1; // decrement due to being at byte1 instead of opcode after IR runs
-        let opcode    = self.ram[pc as usize + 0];
+        let pc = self.cpu.pc;
+        let opcode    = self.ram[pc as usize    ];
         let byte1: u8 = self.ram[pc as usize + 1];
         let byte2: u8 = self.ram[pc as usize + 2];
         let a = self.cpu.a;

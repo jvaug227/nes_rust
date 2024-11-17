@@ -1,5 +1,5 @@
 use std::{error::Error, sync::Arc};
-use egui::{ Ui, Color32, RichText};
+use egui::{ Color32, Mesh, Pos2, RichText, Shape, TextureId, Ui};
 use nes::NESBoard;
 use nes_rust::{cpu::*, cartidge::CartridgeData };
 use wgpu::Backends;
@@ -119,15 +119,27 @@ struct App {
     nes: NESBoard,
     egui: Option<EguiIntegrator>,
     gpu: Option<Gpu>,
+    wgpu_texture: Option<wgpu::Texture>,
+    texture_id: Option<TextureId>,
     clock_cpu: bool,
     last_time: std::time::Instant,
+    frame_time_start: std::time::Instant,
+    frame_time_end: std::time::Instant,
 }
 
 impl App {
     fn new(cpu: Cpu, ram: Vec<u8>) -> Self {
         let nes = NESBoard::new(cpu, ram);
         Self {
-            nes, gpu: None, egui: None, clock_cpu: false, last_time: std::time::Instant::now(),
+            nes,
+            gpu: None,
+            egui: None,
+            texture_id: None,
+            wgpu_texture: None,
+            clock_cpu: false,
+            last_time: std::time::Instant::now(),
+            frame_time_start: std::time::Instant::now(),
+            frame_time_end: std::time::Instant::now(),
         }
     }
 
@@ -177,7 +189,23 @@ impl App {
         let mut encoder = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("encoder"),
         });
-
+        gpu.queue().write_texture(
+            wgpu::ImageCopyTexture {
+                texture: self.wgpu_texture.as_ref().expect("No wgpu texture"),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            self.nes.video_memory(),
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 256),
+                rows_per_image: Some(240),
+            },
+            wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
+        );
         let output_frame = gpu.surface().get_current_texture()?;
         let output_view = output_frame
             .texture
@@ -192,6 +220,10 @@ impl App {
             ui.label("SPACE = Step Instruction    R = RESET    I = IRQ    N = NMI");
             draw_cpu(ui, cpu);
             ui.separator();
+            let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
+            let average_fps = 1.0 / frame_time;
+            ui.label(RichText::new(&format!("Frame time: {}", frame_time)));
+            ui.label(RichText::new(&format!("AVG FPS: {}", average_fps)));
             // draw code here
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -199,13 +231,17 @@ impl App {
 
             ui.label("NES (6502) Emulator");
 
-            draw_ram(ui, ram, 0x0000, 16, 16);
-            ui.separator();
-            draw_ram(ui, ram, 0xC000, 16, 16);
-            ui.separator();
-            draw_ram(ui, ram, 0xC500, 16, 16);
-            ui.separator();
-            draw_ram(ui, ram, 0xC700, 16, 16);
+            let mut mesh = Mesh::with_texture(self.texture_id.expect("No texture id"));
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 { x: 256.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            ui.painter().add(Shape::mesh(mesh));
+
+            // draw_ram(ui, ram, 0x0000, 16, 16);
+            // ui.separator();
+            // draw_ram(ui, ram, 0xC000, 16, 16);
+            // ui.separator();
+            // draw_ram(ui, ram, 0xC500, 16, 16);
+            // ui.separator();
+            // draw_ram(ui, ram, 0xC700, 16, 16);
         });
 
 
@@ -260,6 +296,26 @@ impl App {
             let gpu = self.gpu.get_or_insert_with(|| pollster::block_on(App::create_gpu_struct(event_loop)).unwrap());
 
             _ = self.egui.replace(EguiIntegrator::new(gpu));
+            // let image_data = self.nes.video_memory();
+            // let image = ColorImage::from_rgb([256, 240], image_data);
+            // let mut handle = ctx.load_texture("nes_output_image", image, Default::default());
+            
+            let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("NES_video_output"),
+                view_formats: &[],
+            });
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let texture_id = self.egui.as_mut().expect("Egui failed to update with gpu state").renderer_mut().register_native_texture(gpu.device(), &texture_view, wgpu::FilterMode::Nearest);
+            _ = self.texture_id.insert(texture_id);
+            _ = self.wgpu_texture.insert(texture);
+
         }
 
         fn window_event(
@@ -275,7 +331,10 @@ impl App {
             }
 
             match event {
-                WindowEvent::CloseRequested => { event_loop.exit(); },
+                WindowEvent::CloseRequested => {
+                    event_loop.exit();
+                    _ = self.wgpu_texture.take();
+                },
                 WindowEvent::RedrawRequested => {
                     match self.draw() {
                         Ok(_) => {},
@@ -285,9 +344,11 @@ impl App {
                     if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
                         self.last_time = current_time;
                         let ready = false;
-                        self.nes.clock(ready);
-                        self.nes.clock(ready);
-                        self.nes.clock(ready);
+                        self.frame_time_start = std::time::Instant::now();
+                        for _ in 0..27280 {
+                            self.nes.clock(ready);
+                        }
+                        self.frame_time_end = std::time::Instant::now();
                     }
                 },
                 WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
@@ -359,18 +420,8 @@ impl App {
         ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
     }
 
-    // cpu.bus_mut().ram[0xFFFA] = 0x00;
-    // cpu.bus_mut().ram[0xFFFB] = 0x80;
     ram[0xFFFC] = 0x00;
     ram[0xFFFD] = 0xC0;
-    // cpu.bus_mut().ram[0xFFFE] = 0x00;
-    // cpu.bus_mut().ram[0xFFFF] = 0x80;
-    // cpu.reset();
-    // cpu.pc = 0xC001;
-    // let a = ram[0xC000];
-    // cpu.opcode = a;
-    // cpu.stkpt = 0xFD;
-    // cpu.set_flags(Flags6502::I | Flags6502::U);
 
     let mut app = App::new(cpu, ram);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
