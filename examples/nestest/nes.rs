@@ -1,6 +1,7 @@
-use std::io::Write;
 
-use nes_rust::cpu::{instructions::{is_unofficial_instruction, lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, CpuPinout, InstructionAddressingModes};
+use nes_rust::cpu::{instructions::{lookup::LOOKUP_TABLE, opcode_to_str, Instruction}, Cpu, CpuPinout, InstructionAddressingModes};
+
+use crate::NesTestLine;
 
 
 pub struct NESBoard {
@@ -8,6 +9,8 @@ pub struct NESBoard {
     cpu_pins: CpuPinout,
 
     debug_buffer: Vec<u8>,
+    log_data: Vec<NesTestLine>,
+    current_log: usize,
     ram: Vec<u8>,
     cycles: usize,
 }
@@ -16,7 +19,7 @@ impl NESBoard {
     // Initialize a new circuit
     // Set the inturrupt lines to false so that way the cpu begins startup correctly by detecting a
     // reset inturrupt
-    pub fn new(cpu: Cpu, ram: Vec<u8>) -> NESBoard {
+    pub fn new(cpu: Cpu, ram: Vec<u8>, log_data: Vec<NesTestLine>) -> NESBoard {
         let debug_buffer = b"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX\n".to_vec();
         let cycles = 0;
         let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
@@ -25,6 +28,8 @@ impl NESBoard {
             cpu,
             cpu_pins,
             debug_buffer,
+            log_data,
+            current_log: 0,
             cycles
         }
     }
@@ -188,6 +193,12 @@ impl NESBoard {
         Self::write_spaces(buffer, start, pad_to);
     }
 
+    fn get_log(&mut self) -> NesTestLine {
+        let log = self.log_data[self.current_log];
+        self.current_log = self.current_log.wrapping_add(1);
+        log
+    }
+
     fn print_log(&mut self) {
         let pc = self.cpu.pc;
         let opcode    = self.ram[pc as usize    ];
@@ -207,26 +218,39 @@ impl NESBoard {
         let ppucycles = cycles * 3;
         let ppu1: usize = ppucycles / 341;
         let ppu2: usize = ppucycles % 341;
+
+        let log = self.get_log();
+
+        assert_eq!(log.opcode, opcode);
+        assert_eq!(log.pc, pc);
+        assert_eq!(log.a, a);
+        assert_eq!(log.x, x);
+        assert_eq!(log.y, y);
+        assert_eq!(log.p, p);
+        assert_eq!(log.s, s);
+        assert_eq!(log.starting_cycle, cycles);
+
+
         // 0         1         2         3         4         5         6         7         8         9
         // 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234
         //"XXXX  XX XX XX  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  A:XX X:XX Y:XX P:XX SP:XX PPU:XXX,XXX CYC:XXXXX"
-        let buffer = &mut self.debug_buffer;
-        Self::write_hex_to_buffer(pc, buffer, 0, 4);
-        Self::write_hex_to_buffer(opcode as u16, buffer, 6, 2);
-        if opcode_count == 1 || opcode_count == 2 { Self::write_hex_to_buffer(byte1 as u16, buffer, 9, 2); } else { Self::write_spaces(buffer, 9, 11); }
-        if opcode_count == 2 { Self::write_hex_to_buffer(byte2 as u16, buffer, 12, 2); } else { Self::write_spaces(buffer, 12, 14); }
-        buffer[15] = if is_unofficial_instruction(instruction, opcode) { b'*' } else { b' ' };
-        Self::write_assembly_string(instruction, &self.ram[(pc as usize +1)..], buffer, 16, 46, pc);
-        Self::write_hex_to_buffer(a as u16, buffer, 50, 2);
-        Self::write_hex_to_buffer(x as u16, buffer, 55, 2);
-        Self::write_hex_to_buffer(y as u16, buffer, 60, 2);
-        Self::write_hex_to_buffer(p as u16, buffer, 65, 2);
-        Self::write_hex_to_buffer(s as u16, buffer, 71, 2);
-        Self::write_decimal_to_buffer(ppu1, buffer, 78, 3);
-        Self::write_decimal_to_buffer(ppu2, buffer, 82, 3);
-        Self::write_no_padding_decimal_to_buffer(cycles, buffer, 90, 5);
-        let mut stdout = std::io::stdout().lock();
-        let _e = stdout.write_all(&self.debug_buffer);
-        let _e = stdout.flush();
+        // let buffer = &mut self.debug_buffer;
+        // Self::write_hex_to_buffer(pc, buffer, 0, 4);
+        // Self::write_hex_to_buffer(opcode as u16, buffer, 6, 2);
+        // if opcode_count == 1 || opcode_count == 2 { Self::write_hex_to_buffer(byte1 as u16, buffer, 9, 2); } else { Self::write_spaces(buffer, 9, 11); }
+        // if opcode_count == 2 { Self::write_hex_to_buffer(byte2 as u16, buffer, 12, 2); } else { Self::write_spaces(buffer, 12, 14); }
+        // buffer[15] = if is_unofficial_instruction(instruction, opcode) { b'*' } else { b' ' };
+        // Self::write_assembly_string(instruction, &self.ram[(pc as usize +1)..], buffer, 16, 46, pc);
+        // Self::write_hex_to_buffer(a as u16, buffer, 50, 2);
+        // Self::write_hex_to_buffer(x as u16, buffer, 55, 2);
+        // Self::write_hex_to_buffer(y as u16, buffer, 60, 2);
+        // Self::write_hex_to_buffer(p as u16, buffer, 65, 2);
+        // Self::write_hex_to_buffer(s as u16, buffer, 71, 2);
+        // Self::write_decimal_to_buffer(ppu1, buffer, 78, 3);
+        // Self::write_decimal_to_buffer(ppu2, buffer, 82, 3);
+        // Self::write_no_padding_decimal_to_buffer(cycles, buffer, 90, 5);
+        // let mut stdout = std::io::stdout().lock();
+        // let _e = stdout.write_all(&self.debug_buffer);
+        // let _e = stdout.flush();
     }
 }
