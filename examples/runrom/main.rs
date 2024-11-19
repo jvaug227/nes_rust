@@ -19,10 +19,8 @@ fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
         for row in 0..rows {
             let row_addr = addr as usize + (cols * row as usize);
             let end = row_addr + cols;
-            //let byte_vec: Vec<u8> = vec![];
-            let a = &ram[row_addr..end];
 
-            ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, a));
+            ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, &ram[row_addr..end]));
         }
     });
 
@@ -227,7 +225,7 @@ impl App {
             // draw code here
         });
         egui::CentralPanel::default().show(ctx, |ui| {
-            //egui::SidePanel::left("RAM").show(&context, |ui| {
+            //egui::SidePanel::left("RAM").show(&context, |ui| 
 
             ui.label("NES (6502) Emulator");
 
@@ -288,126 +286,126 @@ impl App {
         gpu.window().request_redraw();
         Ok(())
 
-        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let gpu = self.gpu.get_or_insert_with(|| pollster::block_on(App::create_gpu_struct(event_loop)).unwrap());
+
+        _ = self.egui.replace(EguiIntegrator::new(gpu));
+        // let image_data = self.nes.video_memory();
+        // let image = ColorImage::from_rgb([256, 240], image_data);
+        // let mut handle = ctx.load_texture("nes_output_image", image, Default::default());
+
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("NES_video_output"),
+            view_formats: &[],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let texture_id = self.egui.as_mut().expect("Egui failed to update with gpu state").renderer_mut().register_native_texture(gpu.device(), &texture_view, wgpu::FilterMode::Nearest);
+        _ = self.texture_id.insert(texture_id);
+        _ = self.wgpu_texture.insert(texture);
+
     }
 
-    impl ApplicationHandler for App {
-        fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-            let gpu = self.gpu.get_or_insert_with(|| pollster::block_on(App::create_gpu_struct(event_loop)).unwrap());
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        if let (Some(egui), Some(gpu)) = (self.egui.as_mut(), self.gpu.as_ref()) {
+            let resp = egui.state.on_window_event(&gpu.window, &event);
+            if resp.repaint { gpu.window.request_redraw(); }
+            if resp.consumed { return; }
+        }
 
-            _ = self.egui.replace(EguiIntegrator::new(gpu));
-            // let image_data = self.nes.video_memory();
-            // let image = ColorImage::from_rgb([256, 240], image_data);
-            // let mut handle = ctx.load_texture("nes_output_image", image, Default::default());
-            
-            let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
-                size: wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                label: Some("NES_video_output"),
-                view_formats: &[],
-            });
-            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+                _ = self.wgpu_texture.take();
+            },
+            WindowEvent::RedrawRequested => {
+                match self.draw() {
+                    Ok(_) => {},
+                    Err(e) => { eprintln!("Error: {e}"); }
+                };
+                let current_time = std::time::Instant::now();
+                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
+                    self.last_time = current_time;
+                    let ready = false;
+                    self.frame_time_start = std::time::Instant::now();
+                    for _ in 0..27280 {
+                        self.nes.clock(ready);
+                    }
+                    self.frame_time_end = std::time::Instant::now();
+                }
+            },
+            WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
+                if let Some(gpu) = &mut self.gpu {
+                    gpu.resize( width, height );
+                }
+            },
+            WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
+                if event.repeat { return; }
+                if event.state != ElementState::Pressed { return; }
+                match event.key_without_modifiers().as_ref() {
+                    Key::Character(s) => {
+                        match s {
+                            "r" => { self.nes.reset(); },
+                            "i" => { self.nes.irq(); },
+                            "n" => { self.nes.nmi(); },
+                            "p" => if !self.clock_cpu { self.nes.clock(false); },
+                            _ => {}
+                        }
+                    }
+                    Key::Named(n) => {
+                        if n == NamedKey::Space {
+                            self.clock_cpu = !self.clock_cpu;
+                        }
+                    },
+                    _ => {},
+                }
 
-            let texture_id = self.egui.as_mut().expect("Egui failed to update with gpu state").renderer_mut().register_native_texture(gpu.device(), &texture_view, wgpu::FilterMode::Nearest);
-            _ = self.texture_id.insert(texture_id);
-            _ = self.wgpu_texture.insert(texture);
+            },
+            _ => {}
 
         }
 
-        fn window_event(
-            &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            _window_id: winit::window::WindowId,
-            event: winit::event::WindowEvent,
-        ) {
-            if let (Some(egui), Some(gpu)) = (self.egui.as_mut(), self.gpu.as_ref()) {
-                let resp = egui.state.on_window_event(&gpu.window, &event);
-                if resp.repaint { gpu.window.request_redraw(); }
-                if resp.consumed { return; }
-            }
-
-            match event {
-                WindowEvent::CloseRequested => {
-                    event_loop.exit();
-                    _ = self.wgpu_texture.take();
-                },
-                WindowEvent::RedrawRequested => {
-                    match self.draw() {
-                        Ok(_) => {},
-                        Err(e) => { eprintln!("Error: {e}"); }
-                    };
-                    let current_time = std::time::Instant::now();
-                    if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
-                        self.last_time = current_time;
-                        let ready = false;
-                        self.frame_time_start = std::time::Instant::now();
-                        for _ in 0..27280 {
-                            self.nes.clock(ready);
-                        }
-                        self.frame_time_end = std::time::Instant::now();
-                    }
-                },
-                WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
-                    if let Some(gpu) = &mut self.gpu {
-                        gpu.resize( width, height );
-                    }
-                },
-                WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
-                    if event.repeat { return; }
-                    if event.state != ElementState::Pressed { return; }
-                    match event.key_without_modifiers().as_ref() {
-                        Key::Character(s) => {
-                            match s {
-                                "r" => { self.nes.reset(); },
-                                "i" => { self.nes.irq(); },
-                                "n" => { self.nes.nmi(); },
-                                "p" => if !self.clock_cpu { self.nes.clock(false); },
-                                _ => {}
-                            }
-                        }
-                        Key::Named(n) => {
-                            if n == NamedKey::Space {
-                                self.clock_cpu = !self.clock_cpu;
-                            }
-                        },
-                        _ => {},
-                    }
-
-                },
-                _ => {}
-
-            }
-
-        }
     }
+}
 
 
-    fn main() -> Result<(), Box<dyn Error>> {
-        let event_loop = EventLoop::new()?;
+fn main() -> Result<(), Box<dyn Error>> {
+    let event_loop = EventLoop::new()?;
 
-        let cpu = Cpu::new();
+    let cpu = Cpu::new();
 
-        //let program = vec![0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA];
-        //let program = include_bytes!("official_only.nes");
-        let program = std::fs::read(std::env::args().next().expect("Needs a rom path"))?;
-        let cartridge_data = CartridgeData::decode(&program);
-        println!("Read Catridge: (Maybe Named) {:?}", cartridge_data.title);
-        println!("Program is {} bytes", program.len());
-        println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
-        println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
-        println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
+    let program_path = { let mut args = std::env::args(); _ = args.next(); args.next().expect("Needs a rom path") };
+    println!("Reading from file: {}", program_path);
+    let program = std::fs::read(program_path)?;
+    let cartridge_data = CartridgeData::decode(&program);
+    println!("Read Catridge: (Maybe Named) {:?}", cartridge_data.title);
+    println!("Program is {} bytes", program.len());
+    println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
+    println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
+    println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
 
-        const RAM_SIZE: usize = 256 * 2048;
-        const PROGRAM_RANGE: usize = 32768;
-        let mut ram = vec![0u8; RAM_SIZE];
-        let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
-        let mirror_length = cartridge_data.prg_rom_range.len();
-        // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
-        if mirror_count > 1 {
+    const RAM_SIZE: usize = 256 * 2048;
+    const PROGRAM_RANGE: usize = 32768;
+    let mut ram = vec![0u8; RAM_SIZE];
+    let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
+    let mirror_length = cartridge_data.prg_rom_range.len();
+    // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
+    if mirror_count > 1 {
         let program_range = &program[cartridge_data.prg_rom_range.clone()];
         // println!("Needs to mirror");
         for i in 0..mirror_count {

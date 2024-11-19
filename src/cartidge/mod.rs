@@ -21,7 +21,7 @@ pub enum CartidgeFileFormat {
 
 impl CartridgeData {
     pub fn decode(program: &[u8]) -> Self {
-        let rom_size = program.len();
+        let data_size = program.len();
         let byte0 = program[0];
         let byte1 = program[1];
         let byte2 = program[2];
@@ -36,12 +36,14 @@ impl CartridgeData {
 
         // More thorough testing of Cartidge formats is needed, but this follows the recommended
         // procedure set by https://www.nesdev.org/wiki/INES
-        let format = if is_nes_name { match format_test {
-            0x08 /*if usize::from(byte9) < rom_size*/ => CartidgeFileFormat::NES2,
-            0x04 => CartidgeFileFormat::INESArchaic,
-            0x00 => CartidgeFileFormat::INES,
-            _ => CartidgeFileFormat::INESArchaic,
-        } }
+        let format = if is_nes_name {
+            match format_test {
+                0x08 /*if usize::from(byte9) < rom_size*/ => CartidgeFileFormat::NES2,
+                0x04 => CartidgeFileFormat::INESArchaic,
+                0x00 => CartidgeFileFormat::INES,
+                _ => CartidgeFileFormat::INESArchaic,
+            } 
+        }
         else if is_tnes_name {
             CartidgeFileFormat::TNES
         }
@@ -210,8 +212,49 @@ impl CartridgeData {
                 }
             },
             _ => {
-                unimplemented!();
-                // let tnes_data = TNESFormat::decode(program);
+                let tnes_data = TNESFormat::decode(program);
+                let mut offset = 16usize;
+                let trainer_range = None;
+
+                let prg_rom_range = {
+                    let range = tnes_data.calculate_prg_rom_size();
+                    let begin = offset;
+                    offset += range;
+                    let end = offset;
+                    begin..end
+                };
+
+                let chr_rom_range = {
+                    let range = tnes_data.calculate_chr_rom_size();
+                    if range == 0 {
+                        None // Uses CHR_RAM instead
+                    } else {
+                        let begin = offset;
+                        offset += range;
+                        let end = offset;
+                        Some(begin..end)
+                    }
+                };
+
+                let playchoice_rom_range = None;
+                let playchoice_prom_range = None;
+
+                let nametable_arrangement = tnes_data.mirroring;
+                let nametable_alternate = false;
+
+                let battery = tnes_data.non_volatile_data;
+                let title = None;
+                Self {
+                    trainer_range,
+                    prg_rom_range,
+                    chr_rom_range,
+                    playchoice_rom_range,
+                    playchoice_prom_range,
+                    nametable_arrangement,
+                    nametable_alternate,
+                    battery,
+                    title,
+                }
             },
         }
     }
@@ -220,6 +263,7 @@ impl CartridgeData {
 pub enum NameTableArrangement {
     HORIZONTAL,
     VERTICAL,
+    MapperControlled,
 }
 
 enum TVSystem {
@@ -469,7 +513,47 @@ struct TNESFormat {
     mapper: u8,
     prg_rom_size: usize, // 8192 byte banks
     chr_rom_size: usize, // 8192 byte banks
-    wram: bool,
+    wram: usize,
     mirroring: NameTableArrangement,
     non_volatile_data: bool,
+}
+
+impl TNESFormat {
+    fn decode(program: &[u8]) -> Self {
+        let byte4 = program[4];
+        let byte5 = program[5];
+        let byte6 = program[6];
+        let byte7 = program[7];
+        let byte8 = program[8];
+        let byte9 = program[9];
+
+        let mapper = byte4;
+        let prg_rom_size = usize::from(byte5);
+        let chr_rom_size = usize::from(byte6);
+        let wram = usize::from(byte7);
+        let nametable_arrangement = match byte8 {
+            0 => NameTableArrangement::MapperControlled,
+            1 => NameTableArrangement::HORIZONTAL,
+            _ => NameTableArrangement::VERTICAL,
+        };
+        let non_volatile_data = byte9 != 0;
+
+        
+        Self {
+            mapper,
+            prg_rom_size,
+            chr_rom_size,
+            wram,
+            mirroring: nametable_arrangement,
+            non_volatile_data,
+        }
+    }
+
+    fn calculate_prg_rom_size(&self) -> usize {
+        8192 * self.prg_rom_size
+    }
+
+    fn calculate_chr_rom_size(&self) -> usize {
+        8192 * self.chr_rom_size
+    }
 }
