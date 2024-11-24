@@ -113,12 +113,20 @@ impl EguiIntegrator {
     pub fn renderer(&self) -> &egui_wgpu::Renderer { &self.renderer }
     pub fn renderer_mut(&mut self) -> &mut egui_wgpu::Renderer { &mut self.renderer }
 }
+
 struct App {
     nes: NESBoard,
     egui: Option<EguiIntegrator>,
     gpu: Option<Gpu>,
-    wgpu_texture: Option<wgpu::Texture>,
-    texture_id: Option<TextureId>,
+    frame_texture: Option<wgpu::Texture>,
+    frame_texture_id: Option<TextureId>,
+    pattern_table_1_texture: Option<wgpu::Texture>,
+    pattern_table_1_texture_id: Option<TextureId>,
+    pattern_table_2_texture: Option<wgpu::Texture>,
+    pattern_table_2_texture_id: Option<TextureId>,
+    nametable_texture: Option<wgpu::Texture>,
+    nametable_texture_id: Option<TextureId>,
+    nametable_texture_buffer: Vec<u8>,
     clock_cpu: bool,
     last_time: std::time::Instant,
     frame_time_start: std::time::Instant,
@@ -126,14 +134,20 @@ struct App {
 }
 
 impl App {
-    fn new(cpu: Cpu, ram: Vec<u8>) -> Self {
-        let nes = NESBoard::new(cpu, ram);
+    fn new(nes: NESBoard) -> Self {
         Self {
             nes,
             gpu: None,
             egui: None,
-            texture_id: None,
-            wgpu_texture: None,
+            frame_texture_id: None,
+            frame_texture: None,
+            pattern_table_1_texture: None,
+            pattern_table_1_texture_id: None,
+            pattern_table_2_texture: None,
+            pattern_table_2_texture_id: None,
+            nametable_texture: None,
+            nametable_texture_id: None,
+            nametable_texture_buffer: vec![255; 4 * 32 * 30],
             clock_cpu: false,
             last_time: std::time::Instant::now(),
             frame_time_start: std::time::Instant::now(),
@@ -180,16 +194,121 @@ impl App {
         Ok(gpu)
     }
 
+    fn upload_nes_nametable_texture(gpu: &Gpu, nes: &NESBoard, nametable_texture: &wgpu::Texture, nametable_texture_buffer: &mut [u8]) {
+        let nametable = nes.nametable_memory(0);
+        for (i, b) in nametable.iter().enumerate().take(32*30) {
+            let i = i * 4;
+            nametable_texture_buffer[i  ] = *b;
+            nametable_texture_buffer[i+1] = *b;
+            nametable_texture_buffer[i+2] = *b;
+            nametable_texture_buffer[i+3] = 0xff;
+        }
+        gpu.queue().write_texture(
+            wgpu::ImageCopyTexture {
+                texture: nametable_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            nametable_texture_buffer,
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 32),
+                rows_per_image: Some(30),
+            },
+            wgpu::Extent3d { width: 32, height: 30, depth_or_array_layers: 1 },
+        );
+    }
+
+    fn upload_nes_pattern_table_textures(gpu: &Gpu, nes: &NESBoard, pattern_table_1_texture: &wgpu::Texture, pattern_table_2_texture: &wgpu::Texture) {
+        let mut pt1_buff = vec![0xff; 128*128*4];
+        let mut pt2_buff = vec![0xff; 128*128*4];
+        let pattern_table = nes.pattern_table_memory();
+        let colors = [
+            0xff, 0x00, 0x00,
+            0x00, 0xff, 0x00,
+            0x00, 0x00, 0xff,
+            0x7f, 0x34, 0x00,
+        ];
+
+        let tiles_to_pixels = |buff: &mut [u8], pattern_table: &[u8]| {
+            for py in 0..128 {
+                for px in 0..128 {
+
+                    let tx = px / 8; // [0, 16)
+                    let ty = py / 8; // [0, 16)
+                    let t = (ty * 16 + tx) * 16; // 16 bytes per tile
+                    let to_l = py & 7;
+                    let to_h = to_l + 8;
+                    let bitmask = 0x80 >> (px & 7);
+                    let t_l = ((pattern_table[t + to_l] & bitmask) > 0) as u8;
+                    let t_h = ((pattern_table[t + to_h] & bitmask) > 0) as u8;
+
+                    let color_index = usize::from(((t_h << 1) | t_l) * 3);
+                    let r = colors[color_index  ];
+                    let g = colors[color_index+1];
+                    let b = colors[color_index+2];
+
+                    let p = (py * 128 + px) * 4;
+                    buff[p  ] = r;
+                    buff[p+1] = g;
+                    buff[p+2] = b;
+                    buff[p+3] = 0xff;
+                }
+            }
+        };
+        let half = pattern_table.len() / 2;
+        tiles_to_pixels(&mut pt1_buff, &pattern_table[0..half]);
+        tiles_to_pixels(&mut pt2_buff, &pattern_table[half..]);
+
+        gpu.queue().write_texture(
+            wgpu::ImageCopyTexture {
+                texture: pattern_table_1_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            &pt1_buff,
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 128),
+                rows_per_image: Some(128),
+            },
+            wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+        );
+        gpu.queue().write_texture(
+            wgpu::ImageCopyTexture {
+                texture: pattern_table_2_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            // The actual pixel data
+            &pt2_buff,
+            // The layout of the texture
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 128),
+                rows_per_image: Some(128),
+            },
+            wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+        );
+    }
+
     fn draw(&mut self) -> Result<()> {
 
-        let (Some(gpu), Some(egui), cpu, ram) = (self.gpu.as_ref(), self.egui.as_mut(), &self.nes.cpu(), &self.nes.ram()) else { return Err(anyhow!("Can't draw yet...")) };
+        let (Some(gpu), Some(egui), cpu) = (self.gpu.as_ref(), self.egui.as_mut(), &self.nes.cpu()) else { return Err(anyhow!("Can't draw yet...")) };
 
         let mut encoder = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("encoder"),
         });
         gpu.queue().write_texture(
             wgpu::ImageCopyTexture {
-                texture: self.wgpu_texture.as_ref().expect("No wgpu texture"),
+                texture: self.frame_texture.as_ref().expect("No wgpu texture"),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -204,6 +323,7 @@ impl App {
             },
             wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
         );
+        Self::upload_nes_nametable_texture(gpu, &self.nes, self.nametable_texture.as_ref().expect("No wgpu texture"), &mut self.nametable_texture_buffer);
         let output_frame = gpu.surface().get_current_texture()?;
         let output_view = output_frame
             .texture
@@ -229,8 +349,17 @@ impl App {
 
             ui.label("NES (6502) Emulator");
 
-            let mut mesh = Mesh::with_texture(self.texture_id.expect("No texture id"));
+            let mut mesh = Mesh::with_texture(self.frame_texture_id.expect("No texture id"));
             mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 { x: 256.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            ui.painter().add(Shape::mesh(mesh));
+            let mut mesh = Mesh::with_texture(self.pattern_table_1_texture_id.expect("No texture id"));
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 240.0}, max: Pos2 { x: 128.0, y: 368.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            ui.painter().add(Shape::mesh(mesh));
+            let mut mesh = Mesh::with_texture(self.pattern_table_2_texture_id.expect("No texture id"));
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 128.0, y: 240.0}, max: Pos2 { x: 256.0, y: 368.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            ui.painter().add(Shape::mesh(mesh));
+            let mut mesh = Mesh::with_texture(self.nametable_texture_id.expect("No texture id"));
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 368.0}, max: Pos2 { x: 256.0, y: 624.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
             ui.painter().add(Shape::mesh(mesh));
 
             // draw_ram(ui, ram, 0x0000, 16, 16);
@@ -298,21 +427,65 @@ impl ApplicationHandler for App {
         // let image = ColorImage::from_rgb([256, 240], image_data);
         // let mut handle = ctx.load_texture("nes_output_image", image, Default::default());
 
-        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
-            size: wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            label: Some("NES_video_output"),
-            view_formats: &[],
-        });
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let egui = self.egui.as_mut().expect("Egui should be valid!");
 
-        let texture_id = self.egui.as_mut().expect("Egui failed to update with gpu state").renderer_mut().register_native_texture(gpu.device(), &texture_view, wgpu::FilterMode::Nearest);
-        _ = self.texture_id.insert(texture_id);
-        _ = self.wgpu_texture.insert(texture);
+            let frame_texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("NES_video_output"),
+                view_formats: &[],
+            });
+            let frame_texture_view = frame_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let frame_texture_id = egui.renderer_mut().register_native_texture(gpu.device(), &frame_texture_view, wgpu::FilterMode::Nearest);
+
+            let pattern_table_descriptor = wgpu::TextureDescriptor {
+                size: wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("NES_video_output"),
+                view_formats: &[],
+            };
+            let pattern_table_1_texture = gpu.device().create_texture(&pattern_table_descriptor);
+            let pattern_table_1_texture_view = pattern_table_1_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let pattern_table_1_texture_id = egui.renderer_mut().register_native_texture(gpu.device(), &pattern_table_1_texture_view, wgpu::FilterMode::Nearest);
+
+            let pattern_table_2_texture = gpu.device().create_texture(&pattern_table_descriptor);
+            let pattern_table_2_texture_view = pattern_table_2_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let pattern_table_2_texture_id = egui.renderer_mut().register_native_texture(gpu.device(), &pattern_table_2_texture_view, wgpu::FilterMode::Nearest);
+            Self::upload_nes_pattern_table_textures(gpu, &self.nes, &pattern_table_1_texture, &pattern_table_2_texture);
+
+            let nametable_texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d { width: 32, height: 30, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("NES_video_output"),
+                view_formats: &[],
+            });
+            let nametable_texture_view = nametable_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let nametable_texture_id = egui.renderer_mut().register_native_texture(gpu.device(), &nametable_texture_view, wgpu::FilterMode::Nearest);
+
+            _ = self.frame_texture_id.insert(frame_texture_id);
+            _ = self.frame_texture.insert(frame_texture);
+
+            _ = self.pattern_table_1_texture.insert(pattern_table_1_texture);
+            _ = self.pattern_table_1_texture_id.insert(pattern_table_1_texture_id);
+            _ = self.pattern_table_2_texture.insert(pattern_table_2_texture);
+            _ = self.pattern_table_2_texture_id.insert(pattern_table_2_texture_id);
+
+            _ = self.nametable_texture.insert(nametable_texture);
+            _ = self.nametable_texture_id.insert(nametable_texture_id);
+        }
 
     }
 
@@ -331,7 +504,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
-                _ = self.wgpu_texture.take();
+                _ = self.frame_texture.take();
             },
             WindowEvent::RedrawRequested => {
                 match self.draw() {
@@ -364,6 +537,7 @@ impl ApplicationHandler for App {
                             "i" => { self.nes.irq(); },
                             "n" => { self.nes.nmi(); },
                             "p" => if !self.clock_cpu { self.nes.clock(false); },
+                            "d" => { self.nes.dump_ppu(); },
                             _ => {}
                         }
                     }
@@ -398,30 +572,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Trainer Block: {:?} at {} bytes", cartridge_data.trainer_range, cartridge_data.trainer_range.clone().map(|r| r.len()).unwrap_or(0));
     println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
     println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
+    println!("Mapper: {}", cartridge_data.mapper);
 
-    const RAM_SIZE: usize = 256 * 2048;
-    const PROGRAM_RANGE: usize = 32768;
-    let mut ram = vec![0u8; RAM_SIZE];
-    let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
-    let mirror_length = cartridge_data.prg_rom_range.len();
-    // println!("{:?}", &program[cartridge_data.prg_rom_range.clone()]);
-    if mirror_count > 1 {
-        let program_range = &program[cartridge_data.prg_rom_range.clone()];
-        // println!("Needs to mirror");
-        for i in 0..mirror_count {
-            let mirror_start = 0x8000 + mirror_length*i;
-            let mirror_end = mirror_start + mirror_length;
-            // println!("Mirror {i} from {mirror_start:0>4X} to {mirror_end:0>4X}");
-            ram[mirror_start .. mirror_end].copy_from_slice(program_range);   
-        }
-    } else {
-        ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
-    }
+    // const RAM_SIZE: usize = 256 * 2048;
+    // const PROGRAM_RANGE: usize = 32768;
+    let internal_ram = vec![0u8; 2048];
+    let internal_vram = vec![0u8; 2048];
+    // let mut ram = vec![0u8; RAM_SIZE];
+    // let mirror_count = PROGRAM_RANGE / cartridge_data.prg_rom_range.len();
+    // let mirror_length = cartridge_data.prg_rom_range.len();
+    // if mirror_count > 1 {
+    //     let program_range = &program[cartridge_data.prg_rom_range.clone()];
+    //     for i in 0..mirror_count {
+    //         let mirror_start = 0x8000 + mirror_length*i;
+    //         let mirror_end = mirror_start + mirror_length;
+    //         ram[mirror_start .. mirror_end].copy_from_slice(program_range);
+    //     }
+    // } else {
+    //     ram[0x8000 ..=0xFFFF].copy_from_slice(&program[cartridge_data.prg_rom_range.clone()]);
+    // }
+    let program_rom = program[cartridge_data.prg_rom_range.clone()].to_vec();
+    let character_rom = cartridge_data.chr_rom_range.clone().map(|range| program[range].to_vec()).unwrap_or_default();
+    let program_ram_size = 0;
 
-    ram[0xFFFC] = 0x00;
-    ram[0xFFFD] = 0xC0;
+    // ram[0xFFFC] = 0x00;
+    // ram[0xFFFD] = 0xC0;
 
-    let mut app = App::new(cpu, ram);
+    let nes = NESBoard::new(cpu, internal_ram, internal_vram, program_rom, character_rom, program_ram_size);
+    let mut app = App::new(nes);
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
 

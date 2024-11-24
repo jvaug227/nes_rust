@@ -1,4 +1,5 @@
 use std::ops::Range;
+pub mod mapper;
 
 pub struct CartridgeData {
     pub trainer_range: Option<Range<usize>>,
@@ -10,6 +11,7 @@ pub struct CartridgeData {
     pub nametable_alternate: bool,
     pub battery: bool,
     pub title: Option<String>,
+    pub mapper: usize,
 }
 
 pub enum CartidgeFileFormat {
@@ -90,6 +92,7 @@ impl CartridgeData {
 
                 let battery = ines_archaic_data.non_volatile_data;
                 let title = None;
+                let mapper = ines_archaic_data.mapper;
                 Self {
                     trainer_range,
                     prg_rom_range,
@@ -100,6 +103,7 @@ impl CartridgeData {
                     nametable_alternate,
                     battery,
                     title,
+                    mapper,
                 }
             },
             CartidgeFileFormat::INES => {
@@ -144,6 +148,7 @@ impl CartridgeData {
 
                 let battery = ines_data.base.non_volatile_data;
                 let title = None;
+                let mapper = ines_data.base.mapper;
                 Self {
                     trainer_range,
                     prg_rom_range,
@@ -154,6 +159,7 @@ impl CartridgeData {
                     nametable_alternate,
                     battery,
                     title,
+                    mapper,
                 }
             },
             CartidgeFileFormat::NES2 => {
@@ -199,6 +205,7 @@ impl CartridgeData {
                 let battery = ines2_data.base.non_volatile_data;
                 let title = None;
 
+                let mapper = ines2_data.base.mapper;
                 Self {
                     trainer_range,
                     prg_rom_range,
@@ -209,6 +216,7 @@ impl CartridgeData {
                     nametable_alternate,
                     battery,
                     title,
+                    mapper,
                 }
             },
             _ => {
@@ -244,6 +252,20 @@ impl CartridgeData {
 
                 let battery = tnes_data.non_volatile_data;
                 let title = None;
+                let mapper = match tnes_data.mapper {
+                    0 => 0,
+                    1 => 1,
+                    2 => 9,
+                    3 => 4,
+                    4 => 10,
+                    5 => 5,
+                    6 => 2,
+                    7 => 3,
+                    9 => 7,
+                    31 => 86,
+                    100 => unimplemented!("FDS is not yet implemented"),
+                    _ => unimplemented!("Not a known TNES mapper"),
+                };
                 Self {
                     trainer_range,
                     prg_rom_range,
@@ -254,6 +276,7 @@ impl CartridgeData {
                     nametable_alternate,
                     battery,
                     title,
+                    mapper,
                 }
             },
         }
