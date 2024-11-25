@@ -117,7 +117,6 @@ impl EguiIntegrator {
 struct App {
     nes: NESBoard,
     egui: Option<EguiIntegrator>,
-    gpu: Option<Gpu>,
     frame_texture: Option<wgpu::Texture>,
     frame_texture_id: Option<TextureId>,
     pattern_table_1_texture: Option<wgpu::Texture>,
@@ -128,9 +127,11 @@ struct App {
     nametable_texture_id: Option<TextureId>,
     nametable_texture_buffer: Vec<u8>,
     clock_cpu: bool,
+    run_frame: bool,
     last_time: std::time::Instant,
     frame_time_start: std::time::Instant,
     frame_time_end: std::time::Instant,
+    gpu: Option<Gpu>,
 }
 
 impl App {
@@ -149,6 +150,7 @@ impl App {
             nametable_texture_id: None,
             nametable_texture_buffer: vec![255; 4 * 32 * 30],
             clock_cpu: false,
+            run_frame: false,
             last_time: std::time::Instant::now(),
             frame_time_start: std::time::Instant::now(),
             frame_time_end: std::time::Instant::now(),
@@ -198,9 +200,9 @@ impl App {
         let nametable = nes.nametable_memory(0);
         for (i, b) in nametable.iter().enumerate().take(32*30) {
             let i = i * 4;
-            nametable_texture_buffer[i  ] = *b;
-            nametable_texture_buffer[i+1] = *b;
-            nametable_texture_buffer[i+2] = *b;
+            nametable_texture_buffer[i  ] = *b & 0xf0;
+            nametable_texture_buffer[i+1] = *b << 4;
+            nametable_texture_buffer[i+2] = 0x00;
             nametable_texture_buffer[i+3] = 0xff;
         }
         gpu.queue().write_texture(
@@ -352,14 +354,15 @@ impl App {
             let mut mesh = Mesh::with_texture(self.frame_texture_id.expect("No texture id"));
             mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 { x: 256.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
             ui.painter().add(Shape::mesh(mesh));
+            let mut mesh = Mesh::with_texture(self.nametable_texture_id.expect("No texture id"));
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 256.0, y: 0.0}, max: Pos2 { x: 512.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            ui.painter().add(Shape::mesh(mesh));
+
             let mut mesh = Mesh::with_texture(self.pattern_table_1_texture_id.expect("No texture id"));
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 240.0}, max: Pos2 { x: 128.0, y: 368.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 240.0}, max: Pos2 { x: 256.0, y: 240.0+256.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
             ui.painter().add(Shape::mesh(mesh));
             let mut mesh = Mesh::with_texture(self.pattern_table_2_texture_id.expect("No texture id"));
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 128.0, y: 240.0}, max: Pos2 { x: 256.0, y: 368.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
-            ui.painter().add(Shape::mesh(mesh));
-            let mut mesh = Mesh::with_texture(self.nametable_texture_id.expect("No texture id"));
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 368.0}, max: Pos2 { x: 256.0, y: 624.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
+            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 256.0, y: 240.0}, max: Pos2 { x: 512.0, y: 240.0+256.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
             ui.painter().add(Shape::mesh(mesh));
 
             // draw_ram(ui, ram, 0x0000, 16, 16);
@@ -423,9 +426,6 @@ impl ApplicationHandler for App {
         let gpu = self.gpu.get_or_insert_with(|| pollster::block_on(App::create_gpu_struct(event_loop)).unwrap());
 
         _ = self.egui.replace(EguiIntegrator::new(gpu));
-        // let image_data = self.nes.video_memory();
-        // let image = ColorImage::from_rgb([256, 240], image_data);
-        // let mut handle = ctx.load_texture("nes_output_image", image, Default::default());
 
         {
             let egui = self.egui.as_mut().expect("Egui should be valid!");
@@ -512,7 +512,8 @@ impl ApplicationHandler for App {
                     Err(e) => { eprintln!("Error: {e}"); }
                 };
                 let current_time = std::time::Instant::now();
-                if self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00) {
+                let do_frame = self.run_frame || (self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00));
+                if do_frame {
                     self.last_time = current_time;
                     let ready = false;
                     self.frame_time_start = std::time::Instant::now();
@@ -520,6 +521,7 @@ impl ApplicationHandler for App {
                         self.nes.clock(ready);
                     }
                     self.frame_time_end = std::time::Instant::now();
+                    self.run_frame = false;
                 }
             },
             WindowEvent::Resized(winit::dpi::PhysicalSize{ width, height }) => {
@@ -538,6 +540,7 @@ impl ApplicationHandler for App {
                             "n" => { self.nes.nmi(); },
                             "p" => if !self.clock_cpu { self.nes.clock(false); },
                             "d" => { self.nes.dump_ppu(); },
+                            "f" => { self.run_frame = true; },
                             _ => {}
                         }
                     }

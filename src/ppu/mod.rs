@@ -9,11 +9,10 @@ const SCANLINES_PER_IMAGE: usize = 240;
 
 pub const VIDEO_MEMORY_SIZE: usize = DOTS_PER_IMAGE_ROW * SCANLINES_PER_IMAGE * 4;
 
+#[derive(PartialEq, PartialOrd, Debug)]
 enum VRamManip {
     /// The cycle enabling the R signal
-    Read1,
-    /// The cycle after enabling the R signal, data should be on the bus
-    Read2,
+    Read,
     Write,
     None,
 }
@@ -59,10 +58,7 @@ pub struct Ppu {
 
     vram_address: u16,
     vram_data: u8,
-    vram_address_cycle: bool,
     vram_manip: VRamManip,
-
-    data_destination: DataReadDestination,
 
     next_nametable: u8,
     next_attribute: u8,
@@ -97,10 +93,7 @@ impl Ppu {
 
             vram_address: 0,
             vram_data: 0,
-            vram_address_cycle: true,
             vram_manip: VRamManip::None,
-
-            data_destination: DataReadDestination::CpuDataBus,
 
             next_nametable: 0,
             next_attribute: 0,
@@ -124,49 +117,130 @@ impl Ppu {
     }
 
     pub fn clock(&mut self, pins: &mut PpuPinout) {
-        pins.nmi = true;
 
-        pins.ppu_ale = self.w_register;
-
-        if self.w_register {
-            pins.ppu_address_data_low = self.vram_address as u8;
-            pins.ppu_address_high = (self.vram_address >> 8) as u8;
-            self.vram_address_cycle = false;
-        } else {
-            match self.vram_manip {
-                VRamManip::Read1 => {
-                    self.vram_manip = VRamManip::Read2;
-                    pins.ppu_r = true;
-                }
-                VRamManip::Read2 => {
-                    self.internal_read_buffer = pins.ppu_address_data_low;
-                    self.vram_manip = VRamManip::None;
-                }
-                VRamManip::Write => {
-                    pins.ppu_address_data_low = self.vram_data;
-                    pins.ppu_w = true;
-                    self.vram_manip = VRamManip::None;
-                }
-                VRamManip::None => {
-                    pins.ppu_r = false;
-                    pins.ppu_w = false;
-                }
-            }
+        // Grab read byte before we manipulate the state of the ppu at all
+        if self.vram_manip == VRamManip::Read {
+            self.internal_read_buffer = pins.ppu_address_data_low;
+            self.vram_manip = VRamManip::None;
+        } else if self.vram_manip == VRamManip::Write {
+            // println!("\tEntered ppu cycle {} expecting to write", self.cycle);
         }
 
+        // Reset to reasonable defaults,
+        // While it's pratically guaranteed that the ppu will always be reading during the
+        // non-vblank period, the vblank period is governed by the cpu and its unclear what the ppu
+        // does when not asked to read/write, so Im just choosing to default it to nothing.
+        pins.nmi = true;
+        pins.ppu_r = false;
+        pins.ppu_w = false;
+        pins.ppu_ale = false;
+
+        // Why do I keep switching between checking-before-calling and checking-after-calling
         if pins.cpu_control {
             self.handle_cpu_io(pins);
         }
 
-        if self.is_render_fetch_cycle() {
-            if let Some(address) = self.render_fetch() {
-                pins.ppu_address_data_low = address as u8;
-                pins.ppu_address_high = (address >> 8) as u8;
-                pins.ppu_ale = true;
-                self.vram_manip = VRamManip::Read1;
+        // Render a pixel (if rendering), and/or configure bus to read from vram
+        self.render(pins);
+
+        // If we manipulated the address, put the address on the bus and don't set a read or write
+        // flag; else, use the bus accordingly.
+        // ppu_ale should go low every other tick as long as the ppu is not configured again
+        if pins.ppu_ale {
+            // if self.vram_manip == VRamManip::Write {
+            //     println!("Configuring vram address to write at: {0:0>4X}({0:0>5}) on cycle {1}", (u16::from(pins.ppu_address_high) << 8) | u16::from(pins.ppu_address_data_low), self.cycle);
+            // }
+        } else {
+            match self.vram_manip {
+                VRamManip::Read => {
+                    pins.ppu_r = true;
+                    // will finish at the very start of the next cycle after bus operations
+                }
+                VRamManip::Write => {
+                    self.vram_manip = VRamManip::None;
+                    pins.ppu_address_data_low = self.vram_data;
+                    pins.ppu_w = true;
+                    // println!("\tExpecting to write cycle {}", self.cycle);
+                }
+                _ => { }
             }
         }
 
+    }
+
+    fn render(&mut self, pins: &mut PpuPinout) {
+        if self.is_render_fetch_cycle() {
+            if let Some(address) = self.render_fetch() {
+                self.tile_lsb_scroll.shift();
+                self.tile_msb_scroll.shift();
+                pins.ppu_address_data_low = address as u8;
+                pins.ppu_address_high = (address >> 8) as u8;
+                pins.ppu_ale = true;
+                self.vram_manip = VRamManip::Read;
+            }
+        }
+
+        if self.cycle == 256 {
+            self.increment_y();
+        }
+
+        if self.cycle == 257 {
+            const X_MASK: u16 = 0b1111101111100000;
+            self.vram_address = (self.vram_address & X_MASK) | (self.temp_address & !X_MASK);
+            self.tile_msb_scroll.set(self.next_tile_msb);
+            self.tile_lsb_scroll.set(self.next_tile_lsb);
+        }
+
+        if self.scanline == 262 && (280..305).contains(&self.cycle) {
+            const Y_MASK: u16 = 0b0111101111100000;
+            self.vram_address = (self.vram_address & !Y_MASK) | (self.temp_address & Y_MASK);
+        }
+
+        if self.is_render_cycle() {
+            let point = (self.scanline * 256 + self.cycle) * 4;
+            let colors = [
+                0xFF, 0x00, 0x00,
+                0x00, 0xFF, 0x00,
+                0x00, 0x00, 0xFF,
+                0x7f, 0x34, 0x00,
+            ];
+            let msb = self.tile_msb_scroll.get(self.fine_x_scroll as u16) as u8;
+            let lsb = self.tile_lsb_scroll.get(self.fine_x_scroll as u16) as u8;
+            let tint = usize::from((msb << 1) | lsb) * 3;
+            self.video_data[point    ] = colors[ tint     ];
+            self.video_data[point + 1] = colors[ tint + 1 ];
+            self.video_data[point + 2] = colors[ tint + 2 ];
+            self.video_data[point + 3] = 255;
+        }
+
+        if self.is_begin_vblank_cycle() {
+            self.set_vblank_flag(true);
+            print!("\nv: ");
+            pins.nmi = !self.nmi_enabled();
+        }
+
+        if self.is_end_vblank_cycle() {
+            self.set_vblank_flag(false);
+            print!("\nn: ");
+            self.is_odd_frame = !self.is_odd_frame;
+        }
+
+        self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
+        if self.cycle == 0 { self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME; }
+    }
+
+    fn increment_x(&mut self) {
+        if self.enabled_background_rendering() || self.enabled_sprite_rendering() {
+            if self.vram_address & 0x001F == 31 {
+                self.vram_address &= !0x001F;
+                self.vram_address ^= 0x0400;
+            } else {
+                self.vram_address = self.vram_address.wrapping_add(1);
+            }
+        }
+    }
+
+    fn increment_y(&mut self) {
         if (self.enabled_sprite_rendering() || self.enabled_background_rendering()) && self.cycle == 256 {
             if (self.vram_address & 0x7000) != 0x7000 {                         // if fine Y < 7
                 self.vram_address += 0x1000;                                    // increment fine Y
@@ -184,53 +258,9 @@ impl Ppu {
                 else {
                     y += 1;                                                     // increment coarse Y
                 }
-                self.vram_address = (self.vram_address & !0x03E0) | (y << 5);   // put coarse Y back into v
+                self.vram_address = (self.vram_address & (!0x03E0)) | (y << 5);   // put coarse Y back into v
             }
         }
-
-        if self.cycle == 257 {
-            const X_MASK: u16 = 0b1111101111100000;
-            self.vram_address = (self.vram_address & X_MASK) | (self.temp_address & !X_MASK);
-            self.tile_msb_scroll.set(self.next_tile_msb);
-            self.tile_lsb_scroll.set(self.next_tile_lsb);
-        }
-
-        if self.scanline == 262 && (280..305).contains(&self.cycle) {
-            const Y_MASK: u16 = 0b1111101111100000;
-            self.vram_address = (self.vram_address & !Y_MASK) | (self.temp_address & Y_MASK);
-        }
-
-        if self.is_render_cycle() {
-            let point = (self.scanline * 256 + self.cycle) * 4;
-            let colors = [
-                0xFF, 0x00, 0x00,
-                0x00, 0xFF, 0x00,
-                0x00, 0x00, 0xFF,
-                0xF0, 0xF0, 0x00,
-            ];
-            let msb = self.tile_msb_scroll.get(self.fine_x_scroll as u16) as u8;
-            let lsb = self.tile_lsb_scroll.get(self.fine_x_scroll as u16) as u8;
-            let tint = usize::from((msb << 1) | lsb) * 3;
-            self.video_data[point    ] = colors[ tint + 0 ];
-            self.video_data[point + 1] = colors[ tint + 1 ];
-            self.video_data[point + 2] = colors[ tint + 2 ];
-            self.video_data[point + 3] = 255;
-            self.tile_lsb_scroll.shift();
-            self.tile_msb_scroll.shift();
-        }
-
-        if self.is_begin_vblank_cycle() {
-            self.set_vblank_flag(true);
-            pins.nmi = !self.nmi_enabled();
-        }
-
-        if self.is_end_vblank_cycle() {
-            self.set_vblank_flag(false);
-            self.is_odd_frame = !self.is_odd_frame;
-        }
-
-        self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
-        if self.cycle == 0 { self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME; }
     }
 
     pub fn video_data(&self) -> &[u8] {
@@ -292,20 +322,44 @@ impl Ppu {
                 Some(tile_msb_address)
             }
             7 => {
-                if self.enabled_background_rendering() || self.enabled_sprite_rendering() {
-                    if self.vram_address & 0x001F == 31 {
-                        self.vram_address &= !0x001F;
-                        self.vram_address ^= 0x0400;
-                    } else {
-                        self.vram_address = self.vram_address.wrapping_add(1);
-                    }
-                }
+                self.increment_x();
                 // Increment hoizontal
                 None
             }
             _ => None // second cycles of fetches that don't do anything
         }
 
+    }
+
+    fn set_course_x(&mut self, b: u8) {
+        const COURSE_X_MASK: u16 = 0x001F;
+        self.temp_address = (self.temp_address & !COURSE_X_MASK) | (u16::from(b) & COURSE_X_MASK);
+    }
+    fn get_course_x(&self) -> u8 {
+        const COURSE_X_MASK: u16 = 0x001F;
+        (self.vram_address & COURSE_X_MASK) as u8
+    }
+    fn set_fine_x(&mut self, b: u8) {
+        self.fine_x_scroll = b;
+    }
+    fn get_fine_x(&self) -> u8 {
+        self.fine_x_scroll
+    }
+    fn set_course_y(&mut self, b: u8) {
+        const COURSE_Y_MASK: u16 = 0b0000001111100000;
+        self.temp_address = (self.temp_address & !COURSE_Y_MASK) | ((u16::from(b) & COURSE_Y_MASK) << 5);
+    }
+    fn get_course_y(&self) -> u8 {
+        const COURSE_Y_MASK: u16 = 0b0000001111100000;
+        ((self.vram_address & COURSE_Y_MASK) >> 5) as u8
+    }
+    fn set_fine_y(&mut self, b: u8) {
+        const FINE_Y_MASK: u16 = 0b0111000000000000;
+        self.temp_address = (self.temp_address & !FINE_Y_MASK) | ((u16::from(b) & FINE_Y_MASK) << 12);
+    }
+    fn get_fine_y(&self) -> u8 {
+        const FINE_Y_MASK: u16 = 0b0111000000000000;
+        ((self.vram_address & FINE_Y_MASK) >> 12) as u8
     }
 
     fn base_nametable_address(&self) -> u8 {
@@ -394,19 +448,21 @@ impl Ppu {
             }
             5 => {
                 if !self.w_register {
-                    self.fine_x_scroll = pins.cpu_data & 0x07;
+                    self.set_fine_x(pins.cpu_data & 0x07);
+                    self.set_course_x(pins.cpu_data >> 3);
                 } else {
-                    self.temp_address = (self.temp_address & 0x0FFF) | (((pins.cpu_data & 0x07) as u16) << 12);
-                    self.temp_address = (self.temp_address & 0xFC1F) | (((pins.cpu_data as u16) >> 3) << 5)
+                    self.set_fine_y(pins.cpu_data & 0x07);
+                    self.set_course_y(pins.cpu_data >> 3);
                 }
                 self.w_register = !self.w_register;
             }
             6 => {
                 if !self.w_register {
-                    self.temp_address = (self.temp_address & 0x00FF) | ((pins.cpu_data as u16) << 8);
+                    self.temp_address = (self.temp_address & 0x00FF) | (((pins.cpu_data & 0x3F) as u16) << 8);
                 } else {
                     self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
                     self.vram_address = self.temp_address;
+                    // println!("Cpu wrote new addess: {0:0>4x} ({0})", self.vram_address);
                 }
                 self.w_register = !self.w_register;
             }
@@ -419,23 +475,24 @@ impl Ppu {
                         self.internal_read_buffer
                     };
                     // tell ppu to read from addr
-                    self.vram_address_cycle = true;
-                    self.vram_manip = VRamManip::Read1;
+                    self.vram_manip = VRamManip::Read;
                 } else {
                     // tell ppu to write to addr
-                    if (0x3F00..=0x3FFF).contains(&self.temp_address) {
-                        let palette_address = (self.temp_address - 0x3F00) % 0x20;
+                    if (0x3F00..=0x3FFF).contains(&self.vram_address) {
+                        let palette_address = (self.vram_address - 0x3F00) % 0x20;
                         self.palette_memory[palette_address as usize] = pins.cpu_data;
                     } else {
                         self.vram_data = pins.cpu_data;
-                        self.vram_address_cycle = true;
-                        self.vram_address = self.temp_address;
                         self.vram_manip = VRamManip::Write;
                     };
 
                 }
-                self.temp_address = self.temp_address.wrapping_add(self.vram_address_increment() as u16);
-                self.vram_address = self.temp_address;
+                pins.ppu_address_high = (self.vram_address >> 8) as u8;
+                pins.ppu_address_data_low = self.vram_address as u8;
+                pins.ppu_ale = true;
+                self.vram_address = self.vram_address.wrapping_add(self.vram_address_increment() as u16);
+                print!("w");
+                // println!("Vram address incremented to {0:0>4x} ({0}) in {1:?} mode in cycle {2}+{3}, with data {4} ({4:0>2X})", self.vram_address, self.vram_manip, self.cycle, self.scanline, self.vram_data);
             }
         }
     }

@@ -1,6 +1,5 @@
 use nes_rust::{cpu::{Cpu, CpuPinout}, ppu::{Ppu, PpuPinout}};
 
-
 pub struct NESBoard {
     cpu: Cpu,
     cpu_pins: CpuPinout,
@@ -49,6 +48,9 @@ impl NESBoard {
 
     fn cpu_clock(&mut self, phi: bool) {
         self.cpu_pins.phi = phi;
+        if !self.cpu_pins.nmi {
+            print!("\nnmi: ");
+        }
         let cycle_occured = self.cpu.clock(&mut self.cpu_pins);
         if cycle_occured {
             self.cycles = self.cycles.wrapping_add(1);
@@ -145,14 +147,21 @@ impl NESBoard {
             self.ppu_address_latch = self.ppu_pins.ppu_address_data_low;
         }
         let addr = ((self.ppu_pins.ppu_address_high as usize) << 8) | self.ppu_address_latch as usize;
+        if self.ppu_pins.ppu_w {
+            // println!("\tWriting {0} to 0x{1:0>4X} ({1})", self.ppu_pins.ppu_address_data_low, addr);
+        } else {
+            // println!("\tReading from 0x{0:0>4X} ({0})", addr);
+        }
         if self.ppu_pins.ppu_r || self.ppu_pins.ppu_w {
             match addr {
                 0x0000..0x2000 => {
                     if self.ppu_pins.ppu_r {
                         self.ppu_pins.ppu_address_data_low = self.chr_rom[addr];
+                    } else {
+                        println!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
                     }
                 },
-                0x2000..0x3000 => {
+                0x2000.. => {
                     // internal NES vram or mapped by cartidge
                     // For nametables
                     let addr = (addr - 0x2000) % self.vram.len();
@@ -165,21 +174,23 @@ impl NESBoard {
                         self.vram[addr] = self.ppu_pins.ppu_address_data_low;
                     }
                 },
-                0x3000.. => {
+                // 0x3000.. => {
+                //     println!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
                     // 0x3000..0x3EFF => unused mirron of vram
                     // 0x3F00.. is the start of palette ram, but it's internal to the PPU and doesn't
                     // reach here
-                }
+                // }
                 
             }
         }
 
-        // pass data back to the cpu during a cpu read - this should be occuring between phi1 and
+        // pass buffered data back to the cpu during a cpu read - this should be occuring between phi1 and
         // phi2
         if self.ppu_pins.cpu_control && self.ppu_pins.cpu_rw {
             self.cpu_pins.data_bus = self.ppu_pins.cpu_data;
-            self.ppu_pins.cpu_control = false;
         }
+        // Don't keep the ppu in a state of manipulating registers
+        self.ppu_pins.cpu_control = false;
     }
 
     // Emulate one master clock cycle
