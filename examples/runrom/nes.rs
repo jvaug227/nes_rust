@@ -48,9 +48,6 @@ impl NESBoard {
 
     fn cpu_clock(&mut self, phi: bool) {
         self.cpu_pins.phi = phi;
-        if !self.cpu_pins.nmi {
-            print!("\nnmi: ");
-        }
         let cycle_occured = self.cpu.clock(&mut self.cpu_pins);
         if cycle_occured {
             self.cycles = self.cycles.wrapping_add(1);

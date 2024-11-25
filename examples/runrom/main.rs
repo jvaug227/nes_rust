@@ -517,7 +517,7 @@ impl ApplicationHandler for App {
                     self.last_time = current_time;
                     let ready = false;
                     self.frame_time_start = std::time::Instant::now();
-                    for _ in 0..27280 {
+                    for _ in 0..29780 {
                         self.nes.clock(ready);
                     }
                     self.frame_time_end = std::time::Instant::now();
