@@ -40,11 +40,11 @@ impl Instruction {
 }
 
 pub mod lookup { 
-        use crate::cpu::InstructionAddressingModes as A;
-        use crate::cpu::InstructionOperations as O;
+    use crate::cpu::InstructionAddressingModes as A;
+    use crate::cpu::InstructionOperations as O;
 
-        use super::Instruction;
-        // use Instruction::new as I;
+    use super::Instruction;
+    #[allow(non_snake_case)]
     const fn I(o: u8, a: u8) -> Instruction {
         Instruction::new(o, a)
     }

@@ -497,9 +497,7 @@ impl Cpu {
         use InstructionOperations as InsOp;
         let opcode = instruction.op();
         let addrmode = instruction.addrmode();
-        let is_rwm = matches!(opcode, InsOp::DEC | InsOp::INC | InsOp::LSR | InsOp::ROL | InsOp::ROR | InsOp::ASL);
         let is_rwm = instruction.kind() == InstructionKind::ReadWrite;
-        let is_mw = matches!(opcode, InsOp::STA | InsOp::STX | InsOp::STY | InsOp::SAX);
         let is_mw = instruction.kind() == InstructionKind::Write;
         let do_pagebreak_anyways = matches!(opcode, InsOp::STA) || is_rwm;
         

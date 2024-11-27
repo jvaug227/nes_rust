@@ -17,14 +17,6 @@ enum VRamManip {
     None,
 }
 
-enum DataReadDestination {
-    CpuDataBus,
-    Nametable,
-    AttributeTable,
-    TilePatternLo,
-    TilePatternHi,
-}
-
 struct LoopyRegister(u16);
 impl LoopyRegister {
     fn new() -> Self { Self(0) }

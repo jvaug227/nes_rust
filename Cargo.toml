@@ -14,11 +14,11 @@ bitflags = "2.6.0"
 
 [dev-dependencies]
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 lazy_static = "1.5"
 winit = "0.30"
 egui = "0.29"
 egui-winit = "0.29"
 egui-wgpu = "0.29"
-pollster = "0.3"
+pollster = "0.4"
 wgpu = "22.1"

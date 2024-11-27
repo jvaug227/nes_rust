@@ -14,17 +14,17 @@ use anyhow::{anyhow, Result};
 
 mod nes;
 
-fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
-    ui.vertical_centered_justified(|ui| {
-        for row in 0..rows {
-            let row_addr = addr as usize + (cols * row as usize);
-            let end = row_addr + cols;
-
-            ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, &ram[row_addr..end]));
-        }
-    });
-
-}
+// fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
+//     ui.vertical_centered_justified(|ui| {
+//         for row in 0..rows {
+//             let row_addr = addr as usize + (cols * row as usize);
+//             let end = row_addr + cols;
+//
+//             ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, &ram[row_addr..end]));
+//         }
+//     });
+//
+// }
 
 fn draw_cpu_flag(ui: &mut Ui, flag: Flags6502, cpu: &Cpu) {
     ui.label(RichText::new(flag.to_string()).color(if cpu.get_flag(flag) { Color32::GREEN } else { Color32::RED }));
@@ -494,9 +494,7 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-
-    }
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) { }
 
     fn window_event(
         &mut self,

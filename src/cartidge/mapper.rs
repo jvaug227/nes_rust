@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 trait Mapper {
     fn access_prg(&mut self, address: u16, data: &mut u8, rw: bool);
     fn access_chr(&mut self, address: u16, data: &mut u8, rw: bool);
