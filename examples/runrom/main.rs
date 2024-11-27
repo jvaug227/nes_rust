@@ -409,7 +409,7 @@ impl App {
         ctx.begin_pass(input);
         egui::SidePanel::right("CPU").resizable(true).max_width(400.0).show(ctx,|ui| {
 
-            ui.label("SPACE = Step Instruction    R = RESET    I = IRQ    N = NMI");
+            ui.label("SPACE = Continuous Run    R = RESET    I = IRQ    N = NMI    F = Run Frame Worth of Cycles    P = Step Cycle    D = Dump PPU Data");
             draw_cpu(ui, self.nes.cpu());
             ui.separator();
             let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
@@ -519,6 +519,10 @@ impl ApplicationHandler for App {
                     self.frame_time_start = std::time::Instant::now();
                     for _ in 0..29780 {
                         self.nes.clock(ready);
+                        // if self.nes.finished_frame() {
+                        //     self.nes.reset_finished_frame();
+                        //     break;
+                        // }
                     }
                     self.frame_time_end = std::time::Instant::now();
                     self.run_frame = false;

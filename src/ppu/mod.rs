@@ -20,9 +20,9 @@ enum VRamManip {
 struct LoopyRegister(u16);
 impl LoopyRegister {
     fn new() -> Self { Self(0) }
-    fn set(&mut self, data: u8) { self.0 = (self.0 & 0xF0) | (data as u16); }
+    fn set(&mut self, data: u8) { self.0 = (self.0 & 0xFF00) | (data as u16); }
     fn shift(&mut self) { self.0 <<= 1; }
-    fn get(&self, offset: u16) -> bool { (self.0 & (0x1000 >> offset)) != 0 }
+    fn get(&self, offset: u8) -> bool { (self.0 & (0x8000 >> u16::from(offset))) > 0 }
 }
 
 pub struct PpuPinout {
@@ -37,6 +37,8 @@ pub struct PpuPinout {
     pub ppu_w: bool,
     pub ppu_sync: bool,
     pub ppu_ale: bool,
+
+    pub finished_frame: bool,
 }
 
 pub struct Ppu {
@@ -74,6 +76,20 @@ pub struct Ppu {
 
 
 impl Ppu {
+    pub fn dump(&self) {
+        println!("\n=====PPU DUMP=====");
+        println!("v-address: {:0>4X}", self.vram_address);
+        println!("t-address: {:0>4X}", self.temp_address);
+        println!("w-latch: {}", self.w_register);
+        println!("cycle: {}, scanline: {}", self.cycle, self.scanline);
+        println!("MSB Shift register: {:0>16b}", self.tile_msb_scroll.0);
+        println!("LSB Shift register: {:0>16b}", self.tile_lsb_scroll.0);
+        println!("Next Nametable: {:0>2X}", self.next_nametable);
+        println!("Next MSB byte: {:0>2X}", self.next_tile_msb);
+        println!("Next LSB byte: {:0>2X}", self.next_tile_lsb);
+        println!("Next Attribute: {:0>2X}", self.next_attribute);
+    }
+
     pub fn new() -> Self {
         Self {
             control_register: 0,
@@ -111,7 +127,7 @@ impl Ppu {
     pub fn clock(&mut self, pins: &mut PpuPinout) {
 
         // Grab read byte before we manipulate the state of the ppu at all
-        if self.vram_manip == VRamManip::Read {
+        if self.vram_manip == VRamManip::Read && pins.ppu_r {
             self.internal_read_buffer = pins.ppu_address_data_low;
             self.vram_manip = VRamManip::None;
         }
@@ -158,8 +174,6 @@ impl Ppu {
         if self.is_rendering_enabled() {
             if self.is_render_fetch_cycle() {
                 if let Some(address) = self.render_fetch() {
-                    self.tile_lsb_scroll.shift();
-                    self.tile_msb_scroll.shift();
                     pins.ppu_address_data_low = address as u8;
                     pins.ppu_address_high = (address >> 8) as u8;
                     pins.ppu_ale = true;
@@ -167,33 +181,33 @@ impl Ppu {
                 }
             }
 
-            if self.cycle == 256 {
+            if self.cycle == 256 && self.scanline < 240 {
                 self.increment_y();
             }
 
-            if self.cycle == 257 {
+            if self.cycle == 257 && (self.scanline < 240 || self.scanline == 261) {
                 const X_MASK: u16 = 0b1111101111100000;
                 self.vram_address = (self.vram_address & X_MASK) | (self.temp_address & !X_MASK);
                 self.tile_msb_scroll.set(self.next_tile_msb);
                 self.tile_lsb_scroll.set(self.next_tile_lsb);
             }
 
-            if self.scanline == 262 && (280..305).contains(&self.cycle) {
+            if self.scanline == 261 && (280..305).contains(&self.cycle) {
                 const Y_MASK: u16 = 0b0111101111100000;
                 self.vram_address = (self.vram_address & !Y_MASK) | (self.temp_address & Y_MASK);
             }
 
             if self.is_render_cycle() {
-                let point = (self.scanline * 256 + self.cycle) * 4;
                 let colors = [
                     0xFF, 0x00, 0x00,
                     0x00, 0xFF, 0x00,
                     0x00, 0x00, 0xFF,
                     0x7f, 0x34, 0x00,
                 ];
-                let msb = self.tile_msb_scroll.get(self.fine_x_scroll as u16) as u8;
-                let lsb = self.tile_lsb_scroll.get(self.fine_x_scroll as u16) as u8;
+                let msb = self.tile_msb_scroll.get(self.get_fine_x()) as u8;
+                let lsb = self.tile_lsb_scroll.get(self.get_fine_x()) as u8;
                 let tint = usize::from((msb << 1) | lsb) * 3;
+                let point = (self.scanline * 256 + self.cycle) * 4;
                 self.video_data[point    ] = colors[ tint     ];
                 self.video_data[point + 1] = colors[ tint + 1 ];
                 self.video_data[point + 2] = colors[ tint + 2 ];
@@ -211,6 +225,7 @@ impl Ppu {
             self.set_vblank_flag(false);
             self.is_odd_frame = !self.is_odd_frame;
         }
+
         self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
         if self.cycle == 0 { self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME; }
     }
@@ -225,25 +240,23 @@ impl Ppu {
     }
 
     fn increment_y(&mut self) {
-        if self.cycle == 256 {
-            if (self.vram_address & 0x7000) != 0x7000 {                         // if fine Y < 7
-                self.vram_address += 0x1000;                                    // increment fine Y
+        if (self.vram_address & 0x7000) != 0x7000 {                         // if fine Y < 7
+            self.vram_address += 0x1000;                                    // increment fine Y
+        }
+        else {
+            self.vram_address &= !0x7000;                                   // fine Y = 0
+            let mut y = (self.vram_address & 0x03E0) >> 5;                  // let y = coarse Y
+            if y == 29 {
+                y = 0;                                                      // coarse Y = 0
+                self.vram_address ^= 0x0800;                                // switch vertical nametable
+            }
+            else if y == 31 {
+                y = 0;                                                      // coarse Y = 0, nametable not switched
             }
             else {
-                self.vram_address &= !0x7000;                                   // fine Y = 0
-                let mut y = (self.vram_address & 0x03E0) >> 5;                  // let y = coarse Y
-                if y == 29 {
-                    y = 0;                                                      // coarse Y = 0
-                    self.vram_address ^= 0x0800;                                // switch vertical nametable
-                }
-                else if y == 31 {
-                    y = 0;                                                      // coarse Y = 0, nametable not switched
-                }
-                else {
-                    y += 1;                                                     // increment coarse Y
-                }
-                self.vram_address = (self.vram_address & (!0x03E0)) | (y << 5);   // put coarse Y back into v
+                y += 1;                                                     // increment coarse Y
             }
+            self.vram_address = (self.vram_address & (!0x03E0)) | (y << 5);   // put coarse Y back into v
         }
     }
 
@@ -252,7 +265,7 @@ impl Ppu {
     }
 
     fn is_render_fetch_cycle(&self) -> bool {
-        ((1..257).contains(&self.cycle) || (321..341).contains(&self.cycle)) && ((0..240).contains(&self.scanline) || self.scanline == 261)
+        ((1..257).contains(&self.cycle) || (321..337).contains(&self.cycle)) && ((0..240).contains(&self.scanline) || self.scanline == 261)
     }
 
     fn is_render_cycle(&self) -> bool {
@@ -272,6 +285,8 @@ impl Ppu {
     }
 
     fn render_fetch(&mut self) -> Option<u16> {
+        self.tile_msb_scroll.shift();
+        self.tile_lsb_scroll.shift();
         let v = self.vram_address;
         let v_cycle = self.cycle-1;
         let cycle_fetch_period = v_cycle % 8;
@@ -282,6 +297,7 @@ impl Ppu {
 
                 self.tile_msb_scroll.set(self.next_tile_msb);
                 self.tile_lsb_scroll.set(self.next_tile_lsb);
+
 
                 let nametable_address = 0x2000 | (v & 0x0FFF);
                 Some(nametable_address)
@@ -323,10 +339,6 @@ impl Ppu {
         const COURSE_X_MASK: u16 = 0x001F;
         self.temp_address = (self.temp_address & !COURSE_X_MASK) | (u16::from(b) & COURSE_X_MASK);
     }
-    fn get_course_x(&self) -> u8 {
-        const COURSE_X_MASK: u16 = 0x001F;
-        (self.vram_address & COURSE_X_MASK) as u8
-    }
     fn set_fine_x(&mut self, b: u8) {
         self.fine_x_scroll = b;
     }
@@ -337,17 +349,9 @@ impl Ppu {
         const COURSE_Y_MASK: u16 = 0b0000001111100000;
         self.temp_address = (self.temp_address & !COURSE_Y_MASK) | ((u16::from(b) & COURSE_Y_MASK) << 5);
     }
-    fn get_course_y(&self) -> u8 {
-        const COURSE_Y_MASK: u16 = 0b0000001111100000;
-        ((self.vram_address & COURSE_Y_MASK) >> 5) as u8
-    }
     fn set_fine_y(&mut self, b: u8) {
         const FINE_Y_MASK: u16 = 0b0111000000000000;
         self.temp_address = (self.temp_address & !FINE_Y_MASK) | ((u16::from(b) & FINE_Y_MASK) << 12);
-    }
-    fn get_fine_y(&self) -> u8 {
-        const FINE_Y_MASK: u16 = 0b0111000000000000;
-        ((self.vram_address & FINE_Y_MASK) >> 12) as u8
     }
 
     fn base_nametable_address(&self) -> u8 {

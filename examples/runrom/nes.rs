@@ -27,7 +27,7 @@ impl NESBoard {
         let cycles = 0;
         let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
         let ppu = Ppu::new();
-        let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, };
+        let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
         let prg_ram = vec![0u8; ram_size as usize];
         NESBoard {
             cpu,
@@ -210,14 +210,15 @@ impl NESBoard {
     }
 
     pub fn dump_ppu(&self) {
-        for i in 0..(self.vram.len() / 16) {
-            let vram = &self.vram;
-            println!("{i}: [ {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}]", 
-                vram[i +  0], vram[i +  1], vram[i +  2], vram[i +  3],
-                vram[i +  4], vram[i +  5], vram[i +  6], vram[i +  7],
-                vram[i +  8], vram[i +  9], vram[i + 10], vram[i + 11],
-                vram[i + 12], vram[i + 13], vram[i + 14], vram[i + 15]);
-        }
+        // for i in 0..(self.vram.len() / 16) {
+        //     let vram = &self.vram;
+        //     println!("{i}: [ {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}]", 
+        //         vram[i +  0], vram[i +  1], vram[i +  2], vram[i +  3],
+        //         vram[i +  4], vram[i +  5], vram[i +  6], vram[i +  7],
+        //         vram[i +  8], vram[i +  9], vram[i + 10], vram[i + 11],
+        //         vram[i + 12], vram[i + 13], vram[i + 14], vram[i + 15]);
+        // }
+        self.ppu.dump();
     }
 
     pub fn cpu(&self) -> &Cpu {
@@ -230,6 +231,14 @@ impl NESBoard {
 
     pub fn video_memory(&self) -> &[u8] {
         self.ppu.video_data()
+    }
+
+    pub fn finished_frame(&self) -> bool {
+        self.ppu_pins.finished_frame
+    }
+
+    pub fn reset_finished_frame(&mut self) {
+        self.ppu_pins.finished_frame = false
     }
 
     pub fn pattern_table_memory(&self) -> &[u8] {
