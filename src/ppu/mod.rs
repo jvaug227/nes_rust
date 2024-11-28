@@ -12,13 +12,17 @@ pub const VIDEO_MEMORY_SIZE: usize = DOTS_PER_IMAGE_ROW * SCANLINES_PER_IMAGE * 
 #[derive(PartialEq, PartialOrd, Debug)]
 enum VRamManip {
     /// The cycle enabling the R signal
+    /// Doesn't actually read the byte until the start of the cycle it returns to None
     Read,
+    /// The cycle enabling the W signal
+    /// Outputs the data the same cycle
     Write,
+    /// No action is to be taken
     None,
 }
 
-struct LoopyRegister(u16);
-impl LoopyRegister {
+struct LoopyShiftRegister(u16);
+impl LoopyShiftRegister {
     fn new() -> Self { Self(0) }
     fn set(&mut self, data: u8) { self.0 = (self.0 & 0xFF00) | (data as u16); }
     fn shift(&mut self) { self.0 <<= 1; }
@@ -59,8 +63,10 @@ pub struct Ppu {
     next_tile_lsb: u8,
     next_tile_msb: u8,
 
-    tile_msb_scroll: LoopyRegister,
-    tile_lsb_scroll: LoopyRegister,
+    tile_msb_scroll: LoopyShiftRegister,
+    tile_lsb_scroll: LoopyShiftRegister,
+    attribute_msb_scroll: LoopyShiftRegister,
+    attribute_lsb_scroll: LoopyShiftRegister,
 
     fine_x_scroll: u8,
 
@@ -69,7 +75,8 @@ pub struct Ppu {
     is_odd_frame: bool,
     internal_read_buffer: u8,
     oam_memory: [u8; 256],
-    palette_memory: [u8; 32],
+    frame_palette_memory: [u8; 32],
+    system_palette_memory: [u8; 64 * 3],
 
     video_data: Vec<u8>,
 }
@@ -108,8 +115,10 @@ impl Ppu {
             next_tile_lsb: 0,
             next_tile_msb: 0,
 
-            tile_msb_scroll: LoopyRegister::new(),
-            tile_lsb_scroll: LoopyRegister::new(),
+            tile_msb_scroll: LoopyShiftRegister::new(),
+            tile_lsb_scroll: LoopyShiftRegister::new(),
+            attribute_msb_scroll: LoopyShiftRegister::new(),
+            attribute_lsb_scroll: LoopyShiftRegister::new(),
 
             fine_x_scroll: 0,
 
@@ -118,10 +127,19 @@ impl Ppu {
             is_odd_frame: false,
             internal_read_buffer: 0,
             oam_memory: [0; 256],
-            palette_memory: [0; 32],
+            // 6-bit lookup into real palettes
+            // $3FYX:
+            //  Y = 0h BG, 1h Sprite
+            //  X = 0h - Fh, X = 0, 4, 8, C is always 0
+            frame_palette_memory: [0; 32],
+            system_palette_memory: [0; 64 * 3],
 
             video_data: vec![255; VIDEO_MEMORY_SIZE]
         }
+    }
+
+    pub fn set_palette(&mut self, data: &[u8; 64*3]) {
+        self.system_palette_memory.clone_from_slice(data);
     }
 
     pub fn clock(&mut self, pins: &mut PpuPinout) {
@@ -198,19 +216,26 @@ impl Ppu {
             }
 
             if self.is_render_cycle() {
-                let colors = [
-                    0xFF, 0x00, 0x00,
-                    0x00, 0xFF, 0x00,
-                    0x00, 0x00, 0xFF,
-                    0x7f, 0x34, 0x00,
-                ];
-                let msb = self.tile_msb_scroll.get(self.get_fine_x()) as u8;
-                let lsb = self.tile_lsb_scroll.get(self.get_fine_x()) as u8;
-                let tint = usize::from((msb << 1) | lsb) * 3;
+                let offset = self.get_fine_x();
+                let tile_msb = self.tile_msb_scroll.get(offset) as u8;
+                let tile_lsb = self.tile_lsb_scroll.get(offset) as u8;
+
+                let attribute_msb = self.attribute_msb_scroll.get(offset) as u8;
+                let attribute_lsb = self.attribute_lsb_scroll.get(offset) as u8;
+
+                // bitmap value between 0 and 3, 4 colors inside the palette
+                let pixel_value = usize::from((tile_msb << 1) | tile_lsb);
+                let attribute_value = usize::from((attribute_msb<<1) | attribute_lsb);
+                // one of the 
+                let frame_palette_index = pixel_value | (attribute_value << 2);
+                // Raw color index in the system palette
+                let system_palette_index = self.frame_palette_memory[frame_palette_index] as usize;
+                // 3 channels per color
+                let tint = system_palette_index * 3;
                 let point = (self.scanline * 256 + self.cycle) * 4;
-                self.video_data[point    ] = colors[ tint     ];
-                self.video_data[point + 1] = colors[ tint + 1 ];
-                self.video_data[point + 2] = colors[ tint + 2 ];
+                self.video_data[point    ] = self.system_palette_memory[ tint     ];
+                self.video_data[point + 1] = self.system_palette_memory[ tint + 1 ];
+                self.video_data[point + 2] = self.system_palette_memory[ tint + 2 ];
                 self.video_data[point + 3] = 255;
             }
 
@@ -287,6 +312,8 @@ impl Ppu {
     fn render_fetch(&mut self) -> Option<u16> {
         self.tile_msb_scroll.shift();
         self.tile_lsb_scroll.shift();
+        self.attribute_msb_scroll.shift();
+        self.attribute_lsb_scroll.shift();
         let v = self.vram_address;
         let v_cycle = self.cycle-1;
         let cycle_fetch_period = v_cycle % 8;
@@ -297,6 +324,8 @@ impl Ppu {
 
                 self.tile_msb_scroll.set(self.next_tile_msb);
                 self.tile_lsb_scroll.set(self.next_tile_lsb);
+                self.attribute_msb_scroll.set(0xFF * ((self.next_attribute >> 1) & 1));
+                self.attribute_lsb_scroll.set(0xFF * (self.next_attribute & 1));
 
 
                 let nametable_address = 0x2000 | (v & 0x0FFF);
@@ -305,14 +334,29 @@ impl Ppu {
             2 => {
                 self.next_nametable = self.internal_read_buffer;
 
-                let mut attribute_address = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
-                if (self.vram_address & 0x40) > 0 { attribute_address >>= 4 };
-                if (self.vram_address & 0x02) > 0 { attribute_address >>= 2 };
-                attribute_address &= 0x03;
+                let attribute_address = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
                 Some(attribute_address)
             }
             4 => {
                 self.next_attribute = self.internal_read_buffer;
+                // Palette is one of 4 2-bit indicies into the frame_palette_memory
+                // bit 1 (second bit) of course-y determines indicies 0|1 or 2|3
+                // bit 1 (second bit) of course-x determines indicies 0|2 or 1|3
+                // e.g.                                         [ 3  2  1  0]
+                //  course-x = 1, course-y = 0, attribute-byte = [01|11|10|00]
+                //      course-y = 0, so indicies 0 and 1,
+                //      course-x = 1, so index 1
+                //  course-x = 1, course-y = 1
+                //      course-y = 1, so indicies 2 and 3
+                //      course-x = 1, so index 3
+
+                // if (self.vram_address & 0x40) > 0 { self.next_attribute >>= 4 };
+                // if (self.vram_address & 0x02) > 0 { self.next_attribute >>= 2 };
+                let masked_address = self.vram_address & 0x42;
+                let x = ((masked_address >> 1) & 1) * 2;
+                let y = ((masked_address >> 6) & 1) * 4;
+                self.next_attribute >>= x|y;
+                self.next_attribute &= 0x03;
 
                 let tile_lsb_address = ((self.background_pattern_table() as u16) << 12)
                     + (u16::from(self.next_nametable) << 4) + ((self.vram_address >> 12) & 0b111);
@@ -461,7 +505,7 @@ impl Ppu {
                 if pins.cpu_rw {
                     pins.cpu_data = if (0x3F00..=0x3FFF).contains(&self.temp_address) {
                         let palette_address = (self.temp_address - 0x3F00) % 0x20;
-                        self.palette_memory[palette_address as usize]
+                        self.frame_palette_memory[palette_address as usize]
                     } else {
                         self.internal_read_buffer
                     };
@@ -471,7 +515,7 @@ impl Ppu {
                     // tell ppu to write to addr
                     if (0x3F00..=0x3FFF).contains(&self.vram_address) {
                         let palette_address = (self.vram_address - 0x3F00) % 0x20;
-                        self.palette_memory[palette_address as usize] = pins.cpu_data;
+                        self.frame_palette_memory[palette_address as usize] = pins.cpu_data;
                     } else {
                         self.vram_data = pins.cpu_data;
                         self.vram_manip = VRamManip::Write;

@@ -152,6 +152,8 @@ impl App {
         println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
         println!("Mapper: {}", cartridge_data.mapper);
 
+        let system_palette = include_bytes!("../../src/ntscpalette.pal");
+
         // const RAM_SIZE: usize = 256 * 2048;
         // const PROGRAM_RANGE: usize = 32768;
         let internal_ram = vec![0u8; 2048];
@@ -517,7 +519,7 @@ impl ApplicationHandler for App {
                     self.last_time = current_time;
                     let ready = false;
                     self.frame_time_start = std::time::Instant::now();
-                    for _ in 0..29780 {
+                    for _ in 0..29781 {
                         self.nes.clock(ready);
                         // if self.nes.finished_frame() {
                         //     self.nes.reset_finished_frame();

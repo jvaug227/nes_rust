@@ -26,9 +26,11 @@ impl NESBoard {
     pub fn new(cpu: Cpu, internal_ram: Vec<u8>, internal_vram: Vec<u8>, prg_rom: Vec<u8>, chr_rom: Vec<u8>, ram_size: u8) -> NESBoard {
         let cycles = 0;
         let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
         let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
         let prg_ram = vec![0u8; ram_size as usize];
+        let system_palette: &[u8; 64*3] = include_bytes!("../../src/ntscpalette.pal");
+        ppu.set_palette(system_palette);
         NESBoard {
             cpu,
             cpu_pins,
@@ -144,18 +146,13 @@ impl NESBoard {
             self.ppu_address_latch = self.ppu_pins.ppu_address_data_low;
         }
         let addr = ((self.ppu_pins.ppu_address_high as usize) << 8) | self.ppu_address_latch as usize;
-        if self.ppu_pins.ppu_w {
-            // println!("\tWriting {0} to 0x{1:0>4X} ({1})", self.ppu_pins.ppu_address_data_low, addr);
-        } else {
-            // println!("\tReading from 0x{0:0>4X} ({0})", addr);
-        }
         if self.ppu_pins.ppu_r || self.ppu_pins.ppu_w {
             match addr {
                 0x0000..0x2000 => {
                     if self.ppu_pins.ppu_r {
                         self.ppu_pins.ppu_address_data_low = self.chr_rom[addr];
                     } else {
-                        println!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
+                        panic!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
                     }
                 },
                 0x2000.. => {
