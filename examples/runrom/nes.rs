@@ -29,7 +29,10 @@ impl NESBoard {
         let mut ppu = Ppu::new();
         let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
         let prg_ram = vec![0u8; ram_size as usize];
-        let system_palette: &[u8; 64*3] = include_bytes!("../../src/ntscpalette.pal");
+        // let palette_file = include_bytes!("../../src/ntscpalette.pal");
+        // let palette_file = include_bytes!("../../src/2C02G_wiki.pal");
+        let palette_file = include_bytes!("../../src/Composite_wiki.pal");
+        let system_palette: &[u8; 64*3] = palette_file.first_chunk().expect("Palette file did not have 64 RGB entries");
         ppu.set_palette(system_palette);
         NESBoard {
             cpu,
@@ -207,14 +210,6 @@ impl NESBoard {
     }
 
     pub fn dump_ppu(&self) {
-        // for i in 0..(self.vram.len() / 16) {
-        //     let vram = &self.vram;
-        //     println!("{i}: [ {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}, {:0>2X}]", 
-        //         vram[i +  0], vram[i +  1], vram[i +  2], vram[i +  3],
-        //         vram[i +  4], vram[i +  5], vram[i +  6], vram[i +  7],
-        //         vram[i +  8], vram[i +  9], vram[i + 10], vram[i + 11],
-        //         vram[i + 12], vram[i + 13], vram[i + 14], vram[i + 15]);
-        // }
         self.ppu.dump();
     }
 
