@@ -152,7 +152,6 @@ impl App {
         println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
         println!("Mapper: {}", cartridge_data.mapper);
 
-        let system_palette = include_bytes!("../../src/ntscpalette.pal");
 
         // const RAM_SIZE: usize = 256 * 2048;
         // const PROGRAM_RANGE: usize = 32768;
@@ -411,7 +410,8 @@ impl App {
         ctx.begin_pass(input);
         egui::SidePanel::right("CPU").resizable(true).max_width(400.0).show(ctx,|ui| {
 
-            ui.label("SPACE = Continuous Run    R = RESET    I = IRQ    N = NMI    F = Run Frame Worth of Cycles    P = Step Cycle    D = Dump PPU Data");
+            ui.label("SPACE = Continuous Run    R = RESET    I = IRQ    N = NMI    F = Run Frame Worth of Cycles    P = Step Cycle    O = Dump PPU Data");
+            ui.label("W = UP    S = DOWN    A = LEFT    D = RIGHT    H = A    J = B    K = SELECT    L = START");
             draw_cpu(ui, self.nes.cpu());
             ui.separator();
             let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
@@ -514,7 +514,7 @@ impl ApplicationHandler for App {
             },
             WindowEvent::RedrawRequested => {
                 let current_time = std::time::Instant::now();
-                let do_frame = self.run_frame || (self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(0.00));
+                let do_frame = self.run_frame || (self.clock_cpu && (current_time - self.last_time) > std::time::Duration::from_secs_f64(1.00 / 60.0));
                 if do_frame {
                     self.last_time = current_time;
                     let ready = false;
@@ -539,21 +539,37 @@ impl ApplicationHandler for App {
             },
             WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
                 if event.repeat { return; }
-                if event.state != ElementState::Pressed { return; }
+                let pressed = event.state == ElementState::Pressed;
                 match event.key_without_modifiers().as_ref() {
                     Key::Character(s) => {
                         match s {
-                            "r" => { self.nes.reset(); },
-                            "i" => { self.nes.irq(); },
-                            "n" => { self.nes.nmi(); },
-                            "p" => if !self.clock_cpu { self.nes.clock(false); },
-                            "d" => { self.nes.dump_ppu(); },
-                            "f" => { self.run_frame = true; },
+                            "r" if pressed => { self.nes.reset(); },
+                            "i" if pressed => { self.nes.irq(); },
+                            "n" if pressed => { self.nes.nmi(); },
+                            "p" if pressed => if !self.clock_cpu { self.nes.clock(false); },
+                            "o" if pressed => { self.nes.dump_ppu(); },
+                            "f" if pressed => { self.run_frame = true; },
+                            // a
+                            "l" => { self.nes.set_controller_button(0, 7, pressed); },
+                            // b
+                            "k" => { self.nes.set_controller_button(0, 6, pressed); },
+                            // start
+                            "j" => { self.nes.set_controller_button(0, 5, pressed); },
+                            // select
+                            "h" => { self.nes.set_controller_button(0, 4, pressed); },
+                            // up
+                            "w" => { self.nes.set_controller_button(0, 3, pressed); },
+                            // down
+                            "s" => { self.nes.set_controller_button(0, 2, pressed); },
+                            // left
+                            "a" => { self.nes.set_controller_button(0, 1, pressed); },
+                            // right
+                            "d" => { self.nes.set_controller_button(0, 0, pressed); },
                             _ => {}
                         }
                     }
                     Key::Named(n) => {
-                        if n == NamedKey::Space {
+                        if n == NamedKey::Space && pressed {
                             self.clock_cpu = !self.clock_cpu;
                         }
                     },

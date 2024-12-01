@@ -29,6 +29,16 @@ impl LoopyShiftRegister {
     fn get(&self, offset: u8) -> bool { (self.0 & (0x8000 >> u16::from(offset))) > 0 }
 }
 
+#[derive(Clone, Copy)]
+struct EvaluatedSprite {
+    x: u8,
+    attrib: u8,
+    /// Tile will serve two purposes here:
+    /// A: Will be the tile index in the relevant character table before fetch
+    /// B: Will store the lsb and msb of the tile after fetch
+    tile: u16,
+}
+
 pub struct PpuPinout {
     pub nmi: bool,
     pub cpu_control: bool,
@@ -55,6 +65,7 @@ pub struct Ppu {
 
     temp_address: u16,
     w_register: bool,
+    fine_x_scroll: u8,
 
     vram_address: u16,
     vram_data: u8,
@@ -70,13 +81,18 @@ pub struct Ppu {
     attribute_msb_scroll: LoopyShiftRegister,
     attribute_lsb_scroll: LoopyShiftRegister,
 
-    fine_x_scroll: u8,
 
     scanline: usize,
     cycle: usize,
     is_odd_frame: bool,
     internal_read_buffer: u8,
-    oam_memory: [u8; 256],
+
+    oam_memory: [u8; 4 * 64],
+    secondary_oam_memory: [Option<EvaluatedSprite>; 8],
+    secondary_oam_buffer: [Option<EvaluatedSprite>; 8],
+    secondary_oam_count: usize,
+    secondary_oam_buffer_count: usize,
+
     frame_palette_memory: [u8; 32],
     system_palette_memory: [u8; 64 * 3],
 
@@ -89,16 +105,21 @@ pub struct Ppu {
 impl Ppu {
     pub fn dump(&self) {
         println!("\n=====PPU DUMP=====");
-        println!("v-address: {:0>4X}", self.vram_address);
-        println!("t-address: {:0>4X}", self.temp_address);
-        println!("w-latch: {}", self.w_register);
-        println!("cycle: {}, scanline: {}", self.cycle, self.scanline);
-        println!("MSB Shift register: {:0>16b}", self.tile_msb_scroll.0);
-        println!("LSB Shift register: {:0>16b}", self.tile_lsb_scroll.0);
-        println!("Next Nametable: {:0>2X}", self.next_nametable);
-        println!("Next MSB byte: {:0>2X}", self.next_tile_msb);
-        println!("Next LSB byte: {:0>2X}", self.next_tile_lsb);
-        println!("Next Attribute: {:0>2X}", self.next_attribute);
+        // println!("v-address: {:0>4X}", self.vram_address);
+        // println!("t-address: {:0>4X}", self.temp_address);
+        // println!("w-latch: {}", self.w_register);
+        // println!("cycle: {}, scanline: {}", self.cycle, self.scanline);
+        // println!("MSB Shift register: {:0>16b}", self.tile_msb_scroll.0);
+        // println!("LSB Shift register: {:0>16b}", self.tile_lsb_scroll.0);
+        // println!("Next Nametable: {:0>2X}", self.next_nametable);
+        // println!("Next MSB byte: {:0>2X}", self.next_tile_msb);
+        // println!("Next LSB byte: {:0>2X}", self.next_tile_lsb);
+        // println!("Next Attribute: {:0>2X}", self.next_attribute);
+        for i in 0..64 {
+            let i2 = i * 4;
+            println!("OAM {i}: {} {} {} {}", self.oam_memory[i2], self.oam_memory[i2+1], self.oam_memory[i2+2], self.oam_memory[i2+3]);
+
+        }
     }
 
     pub fn new() -> Self {
@@ -131,6 +152,10 @@ impl Ppu {
             is_odd_frame: false,
             internal_read_buffer: 0,
             oam_memory: [0; 256],
+            secondary_oam_memory: [None; 8],
+            secondary_oam_buffer: [None; 8],
+            secondary_oam_count: 0,
+            secondary_oam_buffer_count: 0,
             // 6-bit lookup into real palettes
             // $3FYX:
             //  Y = 0h BG, 1h Sprite
@@ -207,6 +232,45 @@ impl Ppu {
                 }
             }
 
+
+            if self.is_sprite_evaluation_cycle() && self.scanline < 240 {
+                if self.cycle == 65 {
+                    // Restart evaluation for next scanline
+                    self.oam_address_register = 0;
+                    self.secondary_oam_buffer_count = 0;
+                    self.secondary_oam_buffer.fill(None);
+                    self.set_sprite_overflow(false);
+                }
+                let sprite = self.evaluate_sprite();
+                self.oam_address_register += 4;
+                // println!("Incrementing OAM by evaluation");
+                if sprite.is_some() {
+                    if self.secondary_oam_buffer_count < 8 {
+                        // Push evaluated sprites into a back-buffer so as to not replace sprites
+                        // currently in processing
+                        self.secondary_oam_buffer[self.secondary_oam_buffer_count] = sprite;
+                        self.secondary_oam_buffer_count += 1;
+                    } else {
+                        // TODO: Emulate buggy overflow behavior for more than 8 sprites on a scanline
+                        self.set_sprite_overflow(true);
+                    }
+                }
+            }
+            if self.is_sprite_fetch_cycle() {
+                if let Some(address) = self.sprite_fetch() {
+                    pins.ppu_address_data_low = address as u8;
+                    pins.ppu_address_high = (address >> 8) as u8;
+                    pins.ppu_ale = true;
+                    self.vram_manip = VRamManip::Read;
+                }
+            }
+            if self.cycle == 321 {
+                // Copy back-buffer into front-buffer when rendering is done
+                // TODO: This might be slightly too early and clears sprites 
+                // before rendering the last pixel
+                self.secondary_oam_memory.copy_from_slice(&self.secondary_oam_buffer);
+            }
+
             if self.cycle == 256 && self.scanline < 240 {
                 self.increment_y();
             }
@@ -222,10 +286,28 @@ impl Ppu {
                 const Y_MASK: u16 = 0b0111101111100000;
                 self.vram_address = (self.vram_address & !Y_MASK) | (self.temp_address & Y_MASK);
             }
+
             if self.is_render_cycle() {
-                let sprite_palette_index = if self.is_render_cycle() && self.enabled_sprite_rendering() {
-                    0
-                } else { 0 };
+                let (sprite_palette_index, sprite_priority) = if self.enabled_sprite_rendering() {
+                    let mut sprite_index = 0;
+                    let mut sprite_priority = 0;
+                    for sprite in self.secondary_oam_memory.iter().flatten() {
+                        let x = self.cycle.wrapping_sub(sprite.x as usize);
+                        let attribute = sprite.attrib;
+                        let palette = attribute & 0x03;
+                        let priority = attribute & 0x20;
+                        if x < 8 {
+                            let msb = ((sprite.tile >> (14-x)) & 0b10) as u8;
+                            let lsb = ((sprite.tile >> ( 7-x)) & 0b01) as u8;
+
+                            sprite_index = (palette << 2) | msb | lsb;
+                            sprite_priority = priority;
+                            break;
+                        }
+                    }
+                    (sprite_index as usize, sprite_priority)
+                } else { (0, 0) };
+                
                 let bg_palette_index =  if self.enabled_background_rendering() {
                     let offset = self.get_fine_x();
                     let tile_msb = self.tile_msb_scroll.get(offset) as u8;
@@ -242,10 +324,10 @@ impl Ppu {
                 } else { 0 };
 
                 let pixels = [bg_palette_index, sprite_palette_index];
-                let priority = 0;
+                let priority = sprite_priority;
                 // 1-bit value selecting which half (bg/sprite) of frame palette ram to access
-                let winning_pixel = 0;
-                let system_palette_index = self.frame_palette_memory[(winning_pixel << 5) | pixels[winning_pixel]] as usize;
+                let winning_pixel = (sprite_palette_index & 3 > 0) as usize;
+                let system_palette_index = self.frame_palette_memory[(winning_pixel << 4) | pixels[winning_pixel]] as usize;
                 // Copy range of rgb from system palette to video data; the alpha should always be
                 // 255 as the initial values in video memory are 255 and alpha is never touched
                 // again.
@@ -313,8 +395,6 @@ impl Ppu {
                 //      course-y = 1, so indicies 2 and 3
                 //      course-x = 1, so index 3
 
-                // if (self.vram_address & 0x40) > 0 { self.next_attribute >>= 4 };
-                // if (self.vram_address & 0x02) > 0 { self.next_attribute >>= 2 };
                 let masked_address = self.vram_address & 0x42;
                 let x = ((masked_address >> 1) & 1) * 2;
                 let y = ((masked_address >> 6) & 1) * 4;
@@ -340,6 +420,90 @@ impl Ppu {
             _ => None // second cycles of fetches that don't do anything
         }
 
+    }
+
+    /// TODO: Determine if sprite 7 will get it's cycle 0
+    fn sprite_fetch(&mut self) -> Option<u16> {
+        let relative_cycle = self.cycle - 257;
+        let c = relative_cycle % 8;
+        let sprite_index = (relative_cycle.wrapping_sub(1) >> 3) & 7;
+        if let Some(sprite) = &mut self.secondary_oam_buffer[sprite_index] {
+            let addr = sprite.tile;
+            let flip_horizontally = (sprite.attrib & 0x40) > 0;
+            let data = if flip_horizontally { self.internal_read_buffer.reverse_bits() } else { self.internal_read_buffer } as u16;
+            match c {
+                0 => {
+                    // fetch msb byte? determine if a fetch should occur since cycle 0 will not
+                    // have a read value before this. First msb fetch not until cycle 7
+                    // INFO: This may have been solved by skipping the first dummy cycle that would
+                    // have read the msb
+                    sprite.tile = (sprite.tile & 0x00FF) | (data << 8);
+                    None
+                }
+                4 => {
+                    // Calculate lsb address
+                    Some(addr)
+                }
+                6 => {
+                    // store lsb, msb is not here yet
+                    sprite.tile = data;
+                    // Calculate msb address
+                    Some(addr | 0x08)
+                }
+                _ => { None }
+            }
+        } else {
+            None
+        }
+        
+    }
+
+    fn evaluate_sprite(&mut self) -> Option<EvaluatedSprite> {
+        // Starting from cycle 65, each sprite takes 3 cycles each
+        let c = (self.cycle - 65) % 3;
+        let s = (self.scanline + 1) as u8;
+        // Evaluate only on the last cycle of each sprite,
+        // no need to perfectly emulate the evaluation in over multiple 
+        // cycles as there is no outside bus interaction
+        if c == 2 {
+            let sprite = self.oam_address_register as usize;
+            // byte 0 - y position of top of sprite
+            let y = self.oam_memory[sprite];
+            // byte 1 - tile index:
+            //  8x8 tile - 8-bit index + pattern table bit in control register
+            //  8x16 tile - 1 bit table + 7-bit (ignores the pattern bit in control register, uses
+            //  the bit in the byte). This works because the tiles are consecutive and byte 255 can
+            //  only be used in this case if the tile address is 254.
+            let tile = self.oam_memory[sprite+1];
+            // byte 2 - attributes
+            //  2-bit palette
+            //  3-bit unused
+            //  1-bit priority
+            //  1-bit flip horizontally
+            //  1-bit flip vertically
+            let attrib = self.oam_memory[sprite+2];
+            // byte 3 - left x position
+            let x = self.oam_memory[sprite+3];
+
+            let (table, tile, sprite_height) = if self.sprite_size() { (tile & 1, tile >> 1, 16) } else { (self.sprite_pattern_table(), tile, 8) };
+
+            let flip_vertically = (attrib & 0x80) > 0;
+            let y_s = s.wrapping_sub(y);
+            // TODO: find way to not need to compare y < 240
+            // Sprites stored off-screen at 255 are wrapping around in the comparison and comparing at 0
+            if y < 240 && y_s < sprite_height {
+                // we got a hit!
+                let y_t = if flip_vertically { 7 - y_s } else { y_s } as u16;
+                let tile = ((table as u16) << 12) | ((tile as u16) << 4) | y_t;
+                // println!("Matched sprite {:0>2X} in table {} on scanline {} for y {} ({}), fetching data from {:0>4X}", sprite >> 2, table, self.scanline, y_s, y, tile);
+                return Some(EvaluatedSprite {
+                    x,
+                    attrib,
+                    tile,
+                });
+            }
+        }
+        None
     }
 
     fn handle_cpu_io(&mut self, pins: &mut PpuPinout) {
@@ -448,13 +612,27 @@ impl Ppu {
         }
     }
 
+    fn is_fetch_scanline(&self) -> bool {
+        (0..240).contains(&self.scanline) || self.scanline == 261
+    }
+
     // -- Rendering timing functions --
     fn is_render_fetch_cycle(&self) -> bool {
-        ((1..257).contains(&self.cycle) || (321..337).contains(&self.cycle)) && ((0..240).contains(&self.scanline) || self.scanline == 261)
+        ((1..257).contains(&self.cycle) || (321..337).contains(&self.cycle)) && self.is_fetch_scanline()
     }
 
     fn is_render_cycle(&self) -> bool {
         (0..240).contains(&self.scanline) && (0..256).contains(&self.cycle)
+    }
+
+    fn is_sprite_evaluation_cycle(&self) -> bool {
+        (65..257).contains(&self.cycle)
+    }
+
+    /// This starts at cycle 258 to account for the fact that the MSB byte is *not* addressed
+    /// before the first cycle of this period
+    fn is_sprite_fetch_cycle(&self) -> bool {
+        (258..322).contains(&self.cycle) && self.is_fetch_scanline()
     }
 
     fn is_begin_vblank_cycle(&self) -> bool {

@@ -13,10 +13,16 @@ pub struct NESBoard {
     prg_rom: Vec<u8>,
     chr_rom: Vec<u8>,
     prg_ram: Vec<u8>,
-    cycles: usize,
+
+    // Raw input of the "controllers"
+    controllers: [u8; 2],
+    // Shift registers holding a copy of the "controllers"
+    controllers_copy: [u8; 2],
 
     dma_active: bool,
+    dma_write_cycle: bool,
     dma_address: u8,
+    dma_address_lo: u8,
 }
 
 impl NESBoard {
@@ -24,7 +30,6 @@ impl NESBoard {
     // Set the inturrupt lines to false so that way the cpu begins startup correctly by detecting a
     // reset inturrupt
     pub fn new(cpu: Cpu, internal_ram: Vec<u8>, internal_vram: Vec<u8>, prg_rom: Vec<u8>, chr_rom: Vec<u8>, ram_size: u8) -> NESBoard {
-        let cycles = 0;
         let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
         let mut ppu = Ppu::new();
         let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
@@ -37,26 +42,52 @@ impl NESBoard {
         NESBoard {
             cpu,
             cpu_pins,
+
             ppu,
             ppu_pins,
             ppu_address_latch: 0,
+
             ram: internal_ram,
             vram: internal_vram,
             prg_rom,
             chr_rom,
             prg_ram,
-            cycles,
+
+            controllers: [0; 2],
+            controllers_copy: [0; 2],
+
+            // TODO: keep track of odd-cycles for delaying dma, and figure out where the first
+            // delayed cycle comes from
             dma_active: false,
+            dma_write_cycle: false,
             dma_address: 0,
+            dma_address_lo: 0,
         }
     }
 
     fn cpu_clock(&mut self, phi: bool) {
-        self.cpu_pins.phi = phi;
-        let cycle_occured = self.cpu.clock(&mut self.cpu_pins);
-        if cycle_occured {
-            self.cycles = self.cycles.wrapping_add(1);
+        // cpu is completely suspended during dma, not even the READY pin is used
+        if self.dma_active {
+            if self.dma_write_cycle {
+                // write cycle
+                self.ppu_pins.cpu_addr = 0x4;
+                self.ppu_pins.cpu_data = self.cpu_pins.data_bus;
+                self.ppu_pins.cpu_rw = false;
+                self.ppu_pins.cpu_control = true;
+
+                self.dma_address_lo = self.dma_address_lo.wrapping_add(1);
+                self.dma_active = self.dma_address_lo > 0;
+            } else {
+                // read cycle
+                self.cpu_pins.address_bus = ((self.dma_address as u16) << 8) | (self.dma_address_lo as u16);
+                self.cpu_mem_read();
+            }
+            self.dma_write_cycle = !self.dma_write_cycle;
+            return;
         }
+
+        self.cpu_pins.phi = phi;
+        let _cycle_occured = self.cpu.clock(&mut self.cpu_pins);
         if self.cpu_pins.address_rw && !phi {
             self.cpu_mem_read();
         } else if !self.cpu_pins.address_rw && phi {
@@ -82,6 +113,17 @@ impl NESBoard {
             },
             0x4000..0x4020 => {
                 // apu and IO
+                match addr {
+                    0x4014 => {
+                        // OAM DMA
+                    },
+                    0x4016..0x4018 => {
+                        let controller = (addr & 0b01) as usize;
+                        self.cpu_pins.data_bus = (self.controllers_copy[controller] & 0x80) >> 7;
+                        self.controllers_copy[controller] <<= 1;
+                    }
+                    _ => {}
+                }
             },
             0x4020..0x6000 => {
                 // nothing
@@ -122,7 +164,12 @@ impl NESBoard {
                         // OAM DMA
                         self.dma_active = true;
                         self.dma_address = self.cpu_pins.data_bus;
+                        self.dma_address_lo = 0;
                     },
+                    0x4016..0x4018 => {
+                        let controller = (addr & 0b01) as usize;
+                        self.controllers_copy[controller] = self.controllers[controller];
+                    }
                     _ => {}
                 }
                 // apu and IO
@@ -251,5 +298,14 @@ impl NESBoard {
     }
     pub fn nmi(&mut self) {
         self.cpu_pins.nmi = false;
+    }
+
+    pub fn set_controller(&mut self, controller: usize, inputs: u8) {
+        self.controllers[controller] = inputs;
+    }
+    pub fn set_controller_button(&mut self, controller: usize, button: u8, state: bool) {
+        let button_mask = 1 << button;
+        let state_mask = u8::from(state) << button;
+        self.controllers[controller] = (self.controllers[controller] & !button_mask) | state_mask;
     }
 }
