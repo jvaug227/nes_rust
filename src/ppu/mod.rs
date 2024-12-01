@@ -288,27 +288,30 @@ impl Ppu {
             }
 
             if self.is_render_cycle() {
-                let (sprite_palette_index, sprite_priority) = if self.enabled_sprite_rendering() {
+                let (sprite_palette_index, sprite_priority, sprite_opaque) = if self.enabled_sprite_rendering() {
                     let mut sprite_index = 0;
                     let mut sprite_priority = 0;
+                    let mut opaque = false;
                     for sprite in self.secondary_oam_memory.iter().flatten() {
                         let x = self.cycle.wrapping_sub(sprite.x as usize);
                         let attribute = sprite.attrib;
                         let palette = attribute & 0x03;
-                        let priority = attribute & 0x20;
+                        let priority = (attribute & 0x20 > 0) as usize;
                         if x < 8 {
                             let msb = ((sprite.tile >> (14-x)) & 0b10) as u8;
                             let lsb = ((sprite.tile >> ( 7-x)) & 0b01) as u8;
-
-                            sprite_index = (palette << 2) | msb | lsb;
+                            let palette_index = msb | lsb;
+                            sprite_index = (palette << 2) | palette_index;
                             sprite_priority = priority;
-                            break;
+                            opaque = palette_index > 0;
+                            // First sprite with an opaque pixel at this location
+                            if opaque { break; }
                         }
                     }
-                    (sprite_index as usize, sprite_priority)
-                } else { (0, 0) };
+                    (sprite_index as usize, sprite_priority, opaque)
+                } else { (0, 0, false) };
                 
-                let bg_palette_index =  if self.enabled_background_rendering() {
+                let (bg_palette_index, bg_opaque) =  if self.enabled_background_rendering() {
                     let offset = self.get_fine_x();
                     let tile_msb = self.tile_msb_scroll.get(offset) as u8;
                     let tile_lsb = self.tile_lsb_scroll.get(offset) as u8;
@@ -320,14 +323,24 @@ impl Ppu {
                     let pixel_value = usize::from((tile_msb << 1) | tile_lsb);
                     // 2-bit value selecting which palette
                     let attribute_value = usize::from((attribute_msb<<1) | attribute_lsb);
-                    pixel_value | (attribute_value << 2)
-                } else { 0 };
+                    (pixel_value | (attribute_value << 2), pixel_value > 0)
+                } else { (0, false) };
+                
+                let calculate_winning_pixel = |bg_opaque: usize, sprite_opaque: usize, priority: usize| -> usize {
+                    let idx = bg_opaque | (sprite_opaque << 1);
+                    let is_flippable = bg_opaque & sprite_opaque;
+                    // When both bits are 1's, we flip one of them off based on priority
+                    // Priority 0: we flip the bottom bit off
+                    // Priority 1: we flip the top bit off
+                    idx ^ (is_flippable << priority)
+                };
 
-                let pixels = [bg_palette_index, sprite_palette_index];
+                let pixels = [bg_palette_index, bg_palette_index, sprite_palette_index];
                 let priority = sprite_priority;
                 // 1-bit value selecting which half (bg/sprite) of frame palette ram to access
-                let winning_pixel = (sprite_palette_index & 3 > 0) as usize;
-                let system_palette_index = self.frame_palette_memory[(winning_pixel << 4) | pixels[winning_pixel]] as usize;
+                let winning_pixel = calculate_winning_pixel(bg_opaque as usize, sprite_opaque as usize, priority);
+                let winning_page = (winning_pixel / 2) << 4;
+                let system_palette_index = self.frame_palette_memory[ winning_page | pixels[winning_pixel]] as usize;
                 // Copy range of rgb from system palette to video data; the alpha should always be
                 // 255 as the initial values in video memory are 255 and alpha is never touched
                 // again.
@@ -353,6 +366,9 @@ impl Ppu {
 
     fn render_fetch(&mut self) -> Option<u16> {
         // A shift happens every cycle there is a possibility of reading from vram
+        // TODO: Apparently shifts happen even if rendering is disabled - this is apparently noted
+        // in the PPU rendering page and disabling rendering can visualize the 1's shifted into the
+        // register and not replaced by the sets.
         self.tile_msb_scroll.shift();
         self.tile_lsb_scroll.shift();
         self.attribute_msb_scroll.shift();
