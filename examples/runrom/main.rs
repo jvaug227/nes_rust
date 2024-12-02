@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use egui::{ Color32, Mesh, Pos2, RichText, Shape, TextureId, Ui};
+use egui::{ Color32, Pos2, RichText, TextureId, Ui};
 use nes::NESBoard;
 use nes_rust::{cpu::*, cartidge::CartridgeData };
 use wgpu::Backends;
@@ -260,7 +260,6 @@ impl App {
         size.width = size.width.max(1);
         size.height = size.height.max(1);
 
-        // let _surface_capabilities = surface.get_capabilities(&adapter);
         let surface_config = 
             match surface.get_default_config(&adapter, size.width, size.height) {
                 Some(config) => config,
@@ -398,7 +397,6 @@ impl App {
             },
             wgpu::Extent3d { width: 256, height: 240, depth_or_array_layers: 1 },
         );
-        Self::upload_nes_nametable_texture(gpu, &self.nes, &self.nametable_texture, &mut self.nametable_texture_buffer);
         let output_frame = gpu.surface().get_current_texture()?;
         let output_view = output_frame
             .texture
@@ -410,42 +408,46 @@ impl App {
         ctx.begin_pass(input);
         egui::SidePanel::right("CPU").resizable(true).max_width(400.0).show(ctx,|ui| {
 
-            ui.label("SPACE = Continuous Run    R = RESET    I = IRQ    N = NMI    F = Run Frame Worth of Cycles    P = Step Cycle    O = Dump PPU Data");
+            ui.label("SPACE = Continuous Run    F = Run Frame Worth of Cycles    P = Step Cycle    O = Dump PPU Data");
             ui.label("W = UP    S = DOWN    A = LEFT    D = RIGHT    H = A    J = B    K = SELECT    L = START");
             draw_cpu(ui, self.nes.cpu());
             ui.separator();
             let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
             let average_fps = 1.0 / frame_time;
             ui.label(RichText::new(&format!("Frame time: {}", frame_time)));
-            ui.label(RichText::new(&format!("AVG FPS: {}", average_fps)));
-            // draw code here
+            ui.label(RichText::new(&format!("AVG FPS: {:.2}", average_fps)));
+            ui.separator();
+            if ui.button("RESET").clicked() { self.nes.reset(); }
+            if ui.button("IRQ").clicked() { self.nes.irq(); }
+            if ui.button("NMI").clicked() { self.nes.nmi(); }
+            ui.separator();
+            ui.collapsing("Debug Information", |ui| {
+                Self::upload_nes_nametable_texture(gpu, &self.nes, &self.nametable_texture, &mut self.nametable_texture_buffer);
+                let draw_texture = |ui: &mut Ui, texture_id: TextureId, x: f32, y: f32, width: f32, height: f32| {
+                    let bounding_box = egui::Rect { min: Pos2 {x, y}, max: Pos2 { x: x + width, y: y + height } };
+                    let uv = egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} };
+                    ui.expand_to_include_rect(bounding_box);
+                    ui.painter().image(texture_id, bounding_box, uv, Color32::WHITE);
+                };
+                let (x, y) = ui.next_widget_position().into();
+                let width = 256.0;
+                let height = 240.0;
+                draw_texture(ui, self.nametable_texture_id, x, y, width, height);
+
+                let y = y + height;
+                let height = 256.0;
+
+                draw_texture(ui, self.pattern_table_1_texture_id, x, y, width, height);
+
+                let y = y + height;
+                let height = 256.0;
+                draw_texture(ui, self.pattern_table_2_texture_id, x, y, width, height);
+            });
+
         });
         egui::CentralPanel::default().show(ctx, |ui| {
-            //egui::SidePanel::left("RAM").show(&context, |ui| 
-
             ui.label("NES (6502) Emulator");
-
-            let mut mesh = Mesh::with_texture(self.frame_texture_id);
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 { x: 256.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
-            ui.painter().add(Shape::mesh(mesh));
-            let mut mesh = Mesh::with_texture(self.nametable_texture_id);
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 256.0, y: 0.0}, max: Pos2 { x: 512.0, y: 240.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
-            ui.painter().add(Shape::mesh(mesh));
-
-            let mut mesh = Mesh::with_texture(self.pattern_table_1_texture_id);
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 0.0, y: 240.0}, max: Pos2 { x: 256.0, y: 240.0+256.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
-            ui.painter().add(Shape::mesh(mesh));
-            let mut mesh = Mesh::with_texture(self.pattern_table_2_texture_id);
-            mesh.add_rect_with_uv(egui::Rect { min: Pos2 {x: 256.0, y: 240.0}, max: Pos2 { x: 512.0, y: 240.0+256.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
-            ui.painter().add(Shape::mesh(mesh));
-
-            // draw_ram(ui, ram, 0x0000, 16, 16);
-            // ui.separator();
-            // draw_ram(ui, ram, 0xC000, 16, 16);
-            // ui.separator();
-            // draw_ram(ui, ram, 0xC500, 16, 16);
-            // ui.separator();
-            // draw_ram(ui, ram, 0xC700, 16, 16);
+            ui.painter().image(self.frame_texture_id, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 { x: 256.0 * 2.0, y: 240.0 * 2.0 } }, egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} }, Color32::WHITE);
         });
 
 
@@ -543,9 +545,6 @@ impl ApplicationHandler for App {
                 match event.key_without_modifiers().as_ref() {
                     Key::Character(s) => {
                         match s {
-                            "r" if pressed => { self.nes.reset(); },
-                            "i" if pressed => { self.nes.irq(); },
-                            "n" if pressed => { self.nes.nmi(); },
                             "p" if pressed => if !self.clock_cpu { self.nes.clock(false); },
                             "o" if pressed => { self.nes.dump_ppu(); },
                             "f" if pressed => { self.run_frame = true; },
@@ -584,6 +583,7 @@ impl ApplicationHandler for App {
     }
 }
 
+#[allow(dead_code)] // TODO: Handle suspended state 
 enum AppShell {
     Unintialized,
     Resumed(App),

@@ -335,10 +335,9 @@ impl Ppu {
                     idx ^ (is_flippable << priority)
                 };
 
-                let pixels = [bg_palette_index, bg_palette_index, sprite_palette_index];
-                let priority = sprite_priority;
+                let pixels = [0, bg_palette_index, sprite_palette_index];
                 // 1-bit value selecting which half (bg/sprite) of frame palette ram to access
-                let winning_pixel = calculate_winning_pixel(bg_opaque as usize, sprite_opaque as usize, priority);
+                let winning_pixel = calculate_winning_pixel(bg_opaque as usize, sprite_opaque as usize, sprite_priority);
                 let winning_page = (winning_pixel / 2) << 4;
                 let system_palette_index = self.frame_palette_memory[ winning_page | pixels[winning_pixel]] as usize;
                 // Copy range of rgb from system palette to video data; the alpha should always be
