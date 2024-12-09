@@ -1,4 +1,3 @@
-
 // True size of Rendering Area
 const DOTS_PER_SCANLINE: usize = 341;
 // Contains pre-scan line
@@ -27,6 +26,36 @@ impl LoopyShiftRegister {
     fn set(&mut self, data: u8) { self.0 = (self.0 & 0xFF00) | (data as u16); }
     fn shift(&mut self) { self.0 <<= 1; }
     fn get(&self, offset: u8) -> bool { (self.0 & (0x8000 >> u16::from(offset))) > 0 }
+}
+
+struct PixelBuffer {
+    data: [u8; 256],
+}
+impl PixelBuffer {
+    fn new() -> Self {
+        Self {
+            data: [0; 256],
+        }
+    }
+    fn set(&mut self, x: u8, lsb: u8, msb: u8, priority: u8, palette: u8, sprite_0: bool) {
+        for i in 0..8 {
+            let index = x.wrapping_add(i) as usize;
+            let lsb = lsb >> (7-i) & 1;
+            let msb = msb >> (7-i) & 1;
+            let data = lsb | (msb << 1);
+            if self.data[index] & 3 == 0 && data > 0 {
+                self.data[index] = data | (palette << 2) | priority << 7 | (u8::from(sprite_0) << 6);
+            }
+        }
+    }
+    fn get(&self, pixel: u8) -> (u8, u8, bool) {
+        let data = self.data[pixel as usize];
+        (data & 15, data >> 7, (data & 0x40) > 0)
+    }
+    fn clear(&mut self) {
+        const FILL: u8 = 0x0;
+        self.data.fill(FILL);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -85,12 +114,12 @@ pub struct Ppu {
     scanline: usize,
     cycle: usize,
     is_odd_frame: bool,
+    can_sprite_0: bool,
     internal_read_buffer: u8,
 
     oam_memory: [u8; 4 * 64],
-    secondary_oam_memory: [Option<EvaluatedSprite>; 8],
     secondary_oam_buffer: [Option<EvaluatedSprite>; 8],
-    secondary_oam_count: usize,
+    oam_pixel_buffer: PixelBuffer,
     secondary_oam_buffer_count: usize,
 
     frame_palette_memory: [u8; 32],
@@ -150,11 +179,11 @@ impl Ppu {
             scanline: 261,
             cycle: 0,
             is_odd_frame: false,
+            can_sprite_0: false,
             internal_read_buffer: 0,
             oam_memory: [0; 256],
-            secondary_oam_memory: [None; 8],
             secondary_oam_buffer: [None; 8],
-            secondary_oam_count: 0,
+            oam_pixel_buffer: PixelBuffer::new(),
             secondary_oam_buffer_count: 0,
             // 6-bit lookup into real palettes
             // $3FYX:
@@ -221,7 +250,24 @@ impl Ppu {
 
     }
 
+    fn shift(&mut self) {
+        if self.enabled_background_rendering() {
+            self.tile_msb_scroll.shift();
+            self.tile_lsb_scroll.shift();
+            self.attribute_msb_scroll.shift();
+            self.attribute_lsb_scroll.shift();
+        }
+    } 
+
     fn render(&mut self, pins: &mut PpuPinout) {
+        // A shift happens every cycle there is a possibility of reading from vram
+        // TODO: Apparently shifts happen even if rendering is disabled - this is apparently noted
+        // in the PPU rendering page and disabling rendering can visualize the 1's shifted into the
+        // register and not replaced by the sets.
+        // if self.is_render_fetch_cycle() {
+        if (self.cycle < 257) || (self.cycle >= 321 && self.cycle < 337) {
+            self.shift();
+        }
         if self.is_rendering_enabled() {
             if self.is_render_fetch_cycle() {
                 if let Some(address) = self.render_fetch() {
@@ -242,7 +288,7 @@ impl Ppu {
                     self.set_sprite_overflow(false);
                 }
                 let sprite = self.evaluate_sprite();
-                self.oam_address_register += 4;
+                self.oam_address_register = self.oam_address_register.wrapping_add(4);
                 // println!("Incrementing OAM by evaluation");
                 if sprite.is_some() {
                     if self.secondary_oam_buffer_count < 8 {
@@ -264,15 +310,13 @@ impl Ppu {
                     self.vram_manip = VRamManip::Read;
                 }
             }
-            if self.cycle == 321 {
-                // Copy back-buffer into front-buffer when rendering is done
-                // TODO: This might be slightly too early and clears sprites 
-                // before rendering the last pixel
-                self.secondary_oam_memory.copy_from_slice(&self.secondary_oam_buffer);
+            if self.cycle == 260 {
+                self.oam_pixel_buffer.clear();
             }
 
             if self.cycle == 256 && self.scanline < 240 {
                 self.increment_y();
+                self.can_sprite_0 = false;
             }
 
             // "Transfer X" + 
@@ -288,28 +332,10 @@ impl Ppu {
             }
 
             if self.is_render_cycle() {
-                let (sprite_palette_index, sprite_priority, sprite_opaque) = if self.enabled_sprite_rendering() {
-                    let mut sprite_index = 0;
-                    let mut sprite_priority = 0;
-                    let mut opaque = false;
-                    for sprite in self.secondary_oam_memory.iter().flatten() {
-                        let x = self.cycle.wrapping_sub(sprite.x as usize);
-                        let attribute = sprite.attrib;
-                        let palette = attribute & 0x03;
-                        let priority = (attribute & 0x20 > 0) as usize;
-                        if x < 8 {
-                            let msb = ((sprite.tile >> (14-x)) & 0b10) as u8;
-                            let lsb = ((sprite.tile >> ( 7-x)) & 0b01) as u8;
-                            let palette_index = msb | lsb;
-                            sprite_index = (palette << 2) | palette_index;
-                            sprite_priority = priority;
-                            opaque = palette_index > 0;
-                            // First sprite with an opaque pixel at this location
-                            if opaque { break; }
-                        }
-                    }
-                    (sprite_index as usize, sprite_priority, opaque)
-                } else { (0, 0, false) };
+                let (sprite_palette_index, sprite_priority, sprite_opaque, sprite_0) = if self.enabled_sprite_rendering() {
+                    let (pixel, priority, sprite_0) = self.oam_pixel_buffer.get(self.cycle as u8);
+                    (pixel as usize, priority as usize, (pixel & 3) > 0, sprite_0)
+                } else { (0, 0, false, false) };
                 
                 let (bg_palette_index, bg_opaque) =  if self.enabled_background_rendering() {
                     let offset = self.get_fine_x();
@@ -325,6 +351,10 @@ impl Ppu {
                     let attribute_value = usize::from((attribute_msb<<1) | attribute_lsb);
                     (pixel_value | (attribute_value << 2), pixel_value > 0)
                 } else { (0, false) };
+
+                if self.enabled_background_rendering() && self.enabled_sprite_rendering() && sprite_0 && sprite_opaque && bg_opaque && !self.get_sprite_hit() {
+                    self.set_sprite_hit();
+                }
                 
                 let calculate_winning_pixel = |bg_opaque: usize, sprite_opaque: usize, priority: usize| -> usize {
                     let idx = bg_opaque | (sprite_opaque << 1);
@@ -339,7 +369,8 @@ impl Ppu {
                 // 1-bit value selecting which half (bg/sprite) of frame palette ram to access
                 let winning_pixel = calculate_winning_pixel(bg_opaque as usize, sprite_opaque as usize, sprite_priority);
                 let winning_page = (winning_pixel / 2) << 4;
-                let system_palette_index = self.frame_palette_memory[ winning_page | pixels[winning_pixel]] as usize;
+                
+                let system_palette_index = self.get_frame_palette(winning_page | pixels[winning_pixel]) as usize;
                 // Copy range of rgb from system palette to video data; the alpha should always be
                 // 255 as the initial values in video memory are 255 and alpha is never touched
                 // again.
@@ -359,19 +390,18 @@ impl Ppu {
             self.is_odd_frame = !self.is_odd_frame;
         }
 
+        if self.scanline == 261 && self.cycle == 340 {
+            self.clear_sprite_hit();
+            pins.finished_frame = true;
+        } else {
+            pins.finished_frame = false;
+        }
+
         self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
         if self.cycle == 0 { self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME; }
     }
 
     fn render_fetch(&mut self) -> Option<u16> {
-        // A shift happens every cycle there is a possibility of reading from vram
-        // TODO: Apparently shifts happen even if rendering is disabled - this is apparently noted
-        // in the PPU rendering page and disabling rendering can visualize the 1's shifted into the
-        // register and not replaced by the sets.
-        self.tile_msb_scroll.shift();
-        self.tile_lsb_scroll.shift();
-        self.attribute_msb_scroll.shift();
-        self.attribute_lsb_scroll.shift();
 
         let v = self.vram_address;
         let v_cycle = self.cycle-1;
@@ -452,7 +482,8 @@ impl Ppu {
                     // have a read value before this. First msb fetch not until cycle 7
                     // INFO: This may have been solved by skipping the first dummy cycle that would
                     // have read the msb
-                    sprite.tile = (sprite.tile & 0x00FF) | (data << 8);
+                    self.oam_pixel_buffer.set(sprite.x, sprite.tile as u8, data as u8, ((sprite.attrib & 0x20) > 0) as u8, sprite.attrib & 3, (sprite.attrib & 4) > 0);
+                    // sprite.tile = (sprite.tile & 0x00FF) | (data << 8);
                     None
                 }
                 4 => {
@@ -477,11 +508,13 @@ impl Ppu {
         // Starting from cycle 65, each sprite takes 3 cycles each
         let c = (self.cycle - 65) % 3;
         let s = (self.scanline + 1) as u8;
+
         // Evaluate only on the last cycle of each sprite,
         // no need to perfectly emulate the evaluation in over multiple 
         // cycles as there is no outside bus interaction
         if c == 2 {
             let sprite = self.oam_address_register as usize;
+            let sprite_0_flag = u8::from(sprite == 0) << 2;
             // byte 0 - y position of top of sprite
             let y = self.oam_memory[sprite];
             // byte 1 - tile index:
@@ -496,7 +529,8 @@ impl Ppu {
             //  1-bit priority
             //  1-bit flip horizontally
             //  1-bit flip vertically
-            let attrib = self.oam_memory[sprite+2];
+            // Insert sprite-0 into unused field at bit 2
+            let attrib = self.oam_memory[sprite+2] | sprite_0_flag;
             // byte 3 - left x position
             let x = self.oam_memory[sprite+3];
 
@@ -571,7 +605,7 @@ impl Ppu {
                 if pins.cpu_rw {
                     pins.cpu_data = if (0x3F00..=0x3FFF).contains(&self.temp_address) {
                         let palette_address = (self.temp_address - 0x3F00) % 0x20;
-                        self.frame_palette_memory[palette_address as usize]
+                        self.get_frame_palette(palette_address as usize)
                     } else {
                         self.internal_read_buffer
                     };
@@ -581,7 +615,7 @@ impl Ppu {
                     // tell ppu to write to addr
                     if (0x3F00..=0x3FFF).contains(&self.vram_address) {
                         let palette_address = (self.vram_address - 0x3F00) % 0x20;
-                        self.frame_palette_memory[palette_address as usize] = pins.cpu_data;
+                        self.set_frame_palette(palette_address as usize, pins.cpu_data);
                     } else {
                         self.vram_data = pins.cpu_data;
                         self.vram_manip = VRamManip::Write;
@@ -733,11 +767,26 @@ impl Ppu {
     fn set_sprite_overflow(&mut self, status: bool) {
         self.status_register = (self.status_register & 0b11011111) | ((status as u8) << 5)
     }
-    fn set_sprite_hit(&mut self, status: bool) {
-        self.status_register = (self.status_register & 0b10111111) | ((status as u8) << 6)
+    fn set_sprite_hit(&mut self) {
+        self.status_register = (self.status_register & 0b10111111) | (1 << 6)
+    }
+    fn get_sprite_hit(&mut self) -> bool {
+        (self.status_register & 0b01000000) > 0
+    }
+    fn clear_sprite_hit(&mut self) {
+        self.status_register &= 0b10111111
     }
     fn set_vblank_flag(&mut self, status: bool) {
         self.status_register = (self.status_register & 0b01111111) | ((status as u8) << 7)
+    }
+
+    fn get_frame_palette(&self, index: usize) -> u8 {
+        let index = index * if index & 3 == 0 { 0 } else { 1 };
+        self.frame_palette_memory[index]
+    }
+    fn set_frame_palette(&mut self, index: usize, value: u8) {
+        let index = index * if index & 3 == 0 { 0 } else { 1 };
+        self.frame_palette_memory[index] = value;
     }
 }
 

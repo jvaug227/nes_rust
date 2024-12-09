@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-use std::fmt;
 
 use crate::cpu::instructions::InstructionKind;
 
@@ -16,18 +15,6 @@ bitflags! {
         const U = 0b00100000; // Unused
         const V = 0b01000000; // Overflow
         const N = 0b10000000; // Negative
-    }
-}
-
-impl fmt::Display for Flags6502 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let a = self
-            .iter_names()
-            .collect::<Vec<_>>()
-            .first()
-            .map(|&(name, _flag)| name)
-            .unwrap_or("");
-        write!(f, "{a}")
     }
 }
 
@@ -1297,95 +1284,6 @@ impl Cpu {
 
             _ => { false } // Illegal Instruction
         }
-    }
-
-    // Forces the 6502 into a known state. This is hard-wired inside the CPU. The
-    // registers are set to 0x00, the status register is cleared except for unused
-    // bit which remains at 1. An absolute address is read from location 0xFFFC
-    // which contains a second address that the program counter is set to. This
-    // allows the programmer to jump to a known and programmable location in the
-    // memory to start executing from. Typically the programmer would set the value
-    // at location 0xFFFC at compile time.
-    pub fn reset(&mut self) {
-        // self.addr_data = 0xFFFC;
-        //
-        // self.pc = self.read_word(self.addr_data);
-        //
-        // self.a = 0;
-        // self.x = 0;
-        // self.y = 0;
-        // self.stkpt = 0xFD;
-        // self.status = Flags6502::U;
-        //
-        // self.fetched = 0;
-        // self.cycles = 7;
-    }
-
-    // Interrupt requests are a complex operation and only happen if the
-    // "disable interrupt" flag is 0. IRQs can happen at any time, but
-    // you dont want them to be destructive to the operation of the running
-    // program. Therefore the current instruction is allowed to finish
-    // (which I facilitate by doing the whole thing when cycles == 0) and
-    // then the current program counter is stored on the stack. Then the
-    // current status register is stored on the stack. When the routine
-    // that services the interrupt has finished, the status register
-    // and program counter can be restored to how they where before it
-    // occurred. This is impemented by the "RTI" instruction. Once the IRQ
-    // has happened, in a similar way to a reset, a programmable address
-    // is read form hard coded location 0xFFFE, which is subsequently
-    // set to the program counter.
-    pub fn irq(&mut self) {
-        // // If interrupts are allowed
-        // if !self.get_flag(Flags6502::I) {
-        //     // Push the program counter to the stack. It's 16-bits dont
-        //     // forget so that takes two pushes
-        //     self.write(
-        //         0x0100 + self.stkpt as u16,
-        //         ((self.pc >> 8) & 0x00FF) as u8,
-        //     );
-        //     self.stkpt -= 1;
-        //     self.write(0x0100 + self.stkpt as u16, (self.pc & 0x00FF) as u8);
-        //     self.stkpt -= 1;
-        //
-        //     // Then Push the status register to the stack
-        //     self.set_flag(Flags6502::B, false);
-        //     self.set_flag(Flags6502::U, true);
-        //     self.set_flag(Flags6502::I, true);
-        //     self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-        //     self.stkpt -= 1;
-        //
-        //     // Read new program counter location from fixed address
-        //     self.addr_data = 0xFFFE;
-        //     self.pc = self.read_word(self.addr_data);
-        //
-        //     // IRQs take time
-        //     // cycles.add_assign(2);
-        // }
-    }
-    // A Non-Maskable Interrupt cannot be ignored. It behaves in exactly the
-    // same way as a regular IRQ, but reads the new program counter address
-    // from location 0xFFFA.
-    pub fn nmi(&mut self) {
-        // if !self.get_flag(Flags6502::I) {
-        //     self.write(
-        //         0x0100 + self.stkpt as u16,
-        //         hi_byte(self.pc),
-        //     );
-        //     self.stkpt -= 1;
-        //     self.write(0x0100 + self.stkpt as u16, lo_byte(self.pc));
-        //     self.stkpt -= 1;
-        //
-        //     self.set_flag(Flags6502::B, false);
-        //     self.set_flag(Flags6502::U, true);
-        //     self.set_flag(Flags6502::I, true);
-        //     self.write(0x0100 + self.stkpt as u16, self.get_status().bits());
-        //     self.stkpt -= 1;
-        //
-        //     self.addr_data = 0xFFFA;
-        //     self.pc = self.read_word(self.addr_data);
-        //
-        //     // cycles.add_assign(3);
-        // }
     }
 
     // internal helpers

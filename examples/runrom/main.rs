@@ -26,18 +26,24 @@ mod nes;
 //
 // }
 
-fn draw_cpu_flag(ui: &mut Ui, flag: Flags6502, cpu: &Cpu) {
-    ui.label(RichText::new(flag.to_string()).color(if cpu.get_flag(flag) { Color32::GREEN } else { Color32::RED }));
+fn draw_cpu_flag(ui: &mut Ui, value: u8, text: &str) {
+    let color = if value > 0 { Color32::GREEN } else { Color32::RED };
+    ui.label(RichText::new(text).color(color));
 }
 
 fn draw_cpu(ui: & mut Ui, cpu: &Cpu) {
 
     ui.label("Status:");
     ui.horizontal(|ui: &mut Ui| {
-        let flags = [Flags6502::C, Flags6502::Z, Flags6502::I, Flags6502::D, Flags6502::B, Flags6502::U, Flags6502::V, Flags6502::N];
-        for flag in flags {
-            draw_cpu_flag(ui, flag, cpu);
-        }
+        let status = cpu.get_status().bits();
+        draw_cpu_flag(ui, status & 0x80, "N");
+        draw_cpu_flag(ui, status & 0x40, "V");
+        draw_cpu_flag(ui, status & 0x20, "U");
+        draw_cpu_flag(ui, status & 0x10, "B");
+        draw_cpu_flag(ui, status & 0x08, "D");
+        draw_cpu_flag(ui, status & 0x04, "I");
+        draw_cpu_flag(ui, status & 0x02, "Z");
+        draw_cpu_flag(ui, status & 0x01, "C");
     });
     ui.horizontal(|ui: &mut Ui| {
         ui.label(RichText::new(&format!("PC: ${:#02x}", cpu.pc)));
@@ -151,7 +157,6 @@ impl App {
         println!("Program Rom Block: {:?} at {} bytes", cartridge_data.prg_rom_range, cartridge_data.prg_rom_range.len());
         println!("Character Rom Block: {:?} at {} bytes", cartridge_data.chr_rom_range, cartridge_data.chr_rom_range.clone().map(|r| r.len()).unwrap_or(0));
         println!("Mapper: {}", cartridge_data.mapper);
-
 
         // const RAM_SIZE: usize = 256 * 2048;
         // const PROGRAM_RANGE: usize = 32768;
