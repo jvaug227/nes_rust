@@ -146,7 +146,7 @@ impl Ppu {
         // println!("Next Attribute: {:0>2X}", self.next_attribute);
         for i in 0..64 {
             let i2 = i * 4;
-            println!("OAM {i}: {} {} {} {}", self.oam_memory[i2], self.oam_memory[i2+1], self.oam_memory[i2+2], self.oam_memory[i2+3]);
+            println!("OAM {i:0>2}: {3:0>3},{0:0>3} {1:0>2X}:{2:0>8b}", self.oam_memory[i2], self.oam_memory[i2+1], self.oam_memory[i2+2], self.oam_memory[i2+3]);
 
         }
     }
@@ -260,25 +260,27 @@ impl Ppu {
     } 
 
     fn render(&mut self, pins: &mut PpuPinout) {
-        // A shift happens every cycle there is a possibility of reading from vram
-        // TODO: Apparently shifts happen even if rendering is disabled - this is apparently noted
-        // in the PPU rendering page and disabling rendering can visualize the 1's shifted into the
-        // register and not replaced by the sets.
-        // if self.is_render_fetch_cycle() {
-        if (self.cycle < 257) || (self.cycle >= 321 && self.cycle < 337) {
+        if self.is_render_fetch_cycle() && self.is_rendering_enabled() {
+            if let Some(address) = self.render_fetch() {
+                pins.ppu_address_data_low = address as u8;
+                pins.ppu_address_high = (address >> 8) as u8;
+                pins.ppu_ale = true;
+                self.vram_manip = VRamManip::Read;
+            }
+        }
+        if self.is_sprite_fetch_cycle() && self.is_rendering_enabled() {
+            if let Some(address) = self.sprite_fetch() {
+                pins.ppu_address_data_low = address as u8;
+                pins.ppu_address_high = (address >> 8) as u8;
+                pins.ppu_ale = true;
+                self.vram_manip = VRamManip::Read;
+            }
+        }
+        if (self.cycle > 0 && self.cycle < 257) || (self.cycle >= 321 && self.cycle < 337) {
             self.shift();
         }
+
         if self.is_rendering_enabled() {
-            if self.is_render_fetch_cycle() {
-                if let Some(address) = self.render_fetch() {
-                    pins.ppu_address_data_low = address as u8;
-                    pins.ppu_address_high = (address >> 8) as u8;
-                    pins.ppu_ale = true;
-                    self.vram_manip = VRamManip::Read;
-                }
-            }
-
-
             if self.is_sprite_evaluation_cycle() && self.scanline < 240 {
                 if self.cycle == 65 {
                     // Restart evaluation for next scanline
@@ -302,14 +304,7 @@ impl Ppu {
                     }
                 }
             }
-            if self.is_sprite_fetch_cycle() {
-                if let Some(address) = self.sprite_fetch() {
-                    pins.ppu_address_data_low = address as u8;
-                    pins.ppu_address_high = (address >> 8) as u8;
-                    pins.ppu_ale = true;
-                    self.vram_manip = VRamManip::Read;
-                }
-            }
+
             if self.cycle == 260 {
                 self.oam_pixel_buffer.clear();
             }
@@ -404,7 +399,7 @@ impl Ppu {
     fn render_fetch(&mut self) -> Option<u16> {
 
         let v = self.vram_address;
-        let v_cycle = self.cycle-1;
+        let v_cycle = self.cycle - 1;
         let cycle_fetch_period = v_cycle % 8;
         match cycle_fetch_period {
             0 => {
@@ -781,12 +776,14 @@ impl Ppu {
     }
 
     fn get_frame_palette(&self, index: usize) -> u8 {
-        let index = index * if index & 3 == 0 { 0 } else { 1 };
         self.frame_palette_memory[index]
     }
     fn set_frame_palette(&mut self, index: usize, value: u8) {
-        let index = index * if index & 3 == 0 { 0 } else { 1 };
         self.frame_palette_memory[index] = value;
+        // if this is entry 0 of the palette, also write to entry 0 of the opposite palette (bg ->
+        // sprite or sprite -> bg; selected by bit 5, or 0x10)
+        // Yes, this does mean that there will always be a double write
+        self.frame_palette_memory[index ^ (0x10 * usize::from(index & 3 == 0))] = value;
     }
 }
 
