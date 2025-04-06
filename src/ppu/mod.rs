@@ -376,9 +376,6 @@ impl Ppu {
         if self.is_begin_vblank_cycle() {
             self.set_vblank_flag(true);
             pins.nmi = !self.nmi_enabled();
-            if self.nmi_enabled() {
-                println!("nmi");
-            }
         }
 
         if self.is_end_vblank_cycle() {
@@ -389,7 +386,6 @@ impl Ppu {
 
         pins.finished_frame = self.scanline == 261 && self.cycle == 340;
         if pins.finished_frame && self.is_rendering_enabled() {
-            println!("Frame");
             self.vram_address = self.temp_address;
         }
 
@@ -503,7 +499,7 @@ impl Ppu {
     fn evaluate_sprite(&mut self) -> Option<EvaluatedSprite> {
         // Starting from cycle 65, each sprite takes 3 cycles each
         let c = (self.cycle - 65) % 3;
-        let s = (self.scanline + 1) as u8;
+        let s = (self.scanline) as u8;
 
         // Evaluate only on the last cycle of each sprite,
         // no need to perfectly emulate the evaluation in over multiple 
@@ -563,7 +559,7 @@ impl Ppu {
                 self.mask_register = pins.cpu_data;
             }
             2 => {
-                println!("Reading status: {:0>8b} on scanline {}, rendering enabled: {}", self.status_register, self.scanline, self.is_rendering_enabled());
+                // println!("Cpu Reading status register: {:0>8b} during scanline {}, rendering enabled: {}", self.status_register, self.scanline, self.is_rendering_enabled());
                 pins.cpu_data = self.status_register;
                 self.set_vblank_flag(false);
                 self.w_register = false;
@@ -582,7 +578,7 @@ impl Ppu {
             }
             5 => {
                 if !self.w_register {
-                    println!("Writing to x scroll: {}, {} on scanline {}", pins.cpu_data & 0x07, pins.cpu_data >> 3, self.scanline);
+                    // println!("Writing to x scroll: {}, {} on scanline {}", pins.cpu_data & 0x07, pins.cpu_data >> 3, self.scanline);
                     self.set_fine_x(pins.cpu_data & 0x07);
                     self.set_course_x(pins.cpu_data >> 3);
                 } else {
@@ -597,7 +593,7 @@ impl Ppu {
                 } else {
                     self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
                     self.vram_address = self.temp_address;
-                    println!("Writing {} to vram address", self.temp_address);
+                    // println!("Writing {} to vram address", self.temp_address);
                 }
                 self.w_register = !self.w_register;
             }
@@ -777,7 +773,7 @@ impl Ppu {
         self.status_register &= 0b10111111
     }
     fn set_vblank_flag(&mut self, status: bool) {
-        println!("Setting vblank to {}", status);
+        // println!("Setting vblank to {}", status);
         self.status_register = (self.status_register & 0b01111111) | ((status as u8) << 7)
     }
 

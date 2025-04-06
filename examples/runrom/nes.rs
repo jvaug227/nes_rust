@@ -192,7 +192,7 @@ impl NESBoard {
 
     fn ppu_clock(&mut self) -> bool {
         self.ppu.clock(&mut self.ppu_pins);
-        self.cpu_pins.nmi = self.ppu_pins.nmi;
+        self.cpu_pins.nmi &= self.ppu_pins.nmi;
         if self.ppu_pins.ppu_ale {
             self.ppu_address_latch = self.ppu_pins.ppu_address_data_low;
         }
