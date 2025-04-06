@@ -62,6 +62,7 @@ impl NESBoard {
             dma_write_cycle: false,
             dma_address: 0,
             dma_address_lo: 0,
+
         }
     }
 
@@ -189,7 +190,7 @@ impl NESBoard {
 
     }
 
-    fn ppu_clock(&mut self) {
+    fn ppu_clock(&mut self) -> bool {
         self.ppu.clock(&mut self.ppu_pins);
         self.cpu_pins.nmi = self.ppu_pins.nmi;
         if self.ppu_pins.ppu_ale {
@@ -235,18 +236,20 @@ impl NESBoard {
         }
         // Don't keep the ppu in a state of manipulating registers
         self.ppu_pins.cpu_control = false;
+
+        self.ppu_pins.finished_frame
     }
 
     // Emulate one master clock cycle
-    pub fn clock(&mut self, _ready: bool) {
+    pub fn clock(&mut self, _ready: bool) -> bool {
 
-        self.ppu_clock();
-        self.ppu_clock();
+        let ff_1 = self.ppu_clock();
+        let ff_2 = self.ppu_clock();
 
         self.cpu_clock(false);
 
         // One ppu clock between phi1 and phi2 to handle reading from ppu
-        self.ppu_clock();
+        let ff_3 = self.ppu_clock();
 
         self.cpu_clock(true);
 
@@ -254,6 +257,7 @@ impl NESBoard {
         self.cpu_pins.reset = true;
         self.cpu_pins.irq = true;
         self.cpu_pins.nmi = true; // might be unnecessary as ppu manages nmi
+        ff_1 || ff_2 || ff_3
     }
 
     pub fn dump_ppu(&self) {
@@ -270,14 +274,6 @@ impl NESBoard {
 
     pub fn video_memory(&self) -> &[u8] {
         self.ppu.video_data()
-    }
-
-    pub fn finished_frame(&self) -> bool {
-        self.ppu_pins.finished_frame
-    }
-
-    pub fn reset_finished_frame(&mut self) {
-        self.ppu_pins.finished_frame = false
     }
 
     pub fn pattern_table_memory(&self) -> &[u8] {

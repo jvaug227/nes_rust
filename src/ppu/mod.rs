@@ -43,7 +43,8 @@ impl PixelBuffer {
             let lsb = lsb >> (7-i) & 1;
             let msb = msb >> (7-i) & 1;
             let data = lsb | (msb << 1);
-            if self.data[index] & 3 == 0 && data > 0 {
+            let existing_data_transparent = self.data[index] & 3 == 0;
+            if existing_data_transparent {
                 self.data[index] = data | (palette << 2) | priority << 7 | (u8::from(sprite_0) << 6);
             }
         }
@@ -114,7 +115,6 @@ pub struct Ppu {
     scanline: usize,
     cycle: usize,
     is_odd_frame: bool,
-    can_sprite_0: bool,
     internal_read_buffer: u8,
 
     oam_memory: [u8; 4 * 64],
@@ -179,7 +179,6 @@ impl Ppu {
             scanline: 261,
             cycle: 0,
             is_odd_frame: false,
-            can_sprite_0: false,
             internal_read_buffer: 0,
             oam_memory: [0; 256],
             secondary_oam_buffer: [None; 8],
@@ -311,7 +310,6 @@ impl Ppu {
 
             if self.cycle == 256 && self.scanline < 240 {
                 self.increment_y();
-                self.can_sprite_0 = false;
             }
 
             // "Transfer X" + 
@@ -378,18 +376,21 @@ impl Ppu {
         if self.is_begin_vblank_cycle() {
             self.set_vblank_flag(true);
             pins.nmi = !self.nmi_enabled();
+            if self.nmi_enabled() {
+                println!("nmi");
+            }
         }
 
         if self.is_end_vblank_cycle() {
             self.set_vblank_flag(false);
+            self.clear_sprite_hit();
             self.is_odd_frame = !self.is_odd_frame;
         }
 
-        if self.scanline == 261 && self.cycle == 340 {
-            self.clear_sprite_hit();
-            pins.finished_frame = true;
-        } else {
-            pins.finished_frame = false;
+        pins.finished_frame = self.scanline == 261 && self.cycle == 340;
+        if pins.finished_frame && self.is_rendering_enabled() {
+            println!("Frame");
+            self.vram_address = self.temp_address;
         }
 
         self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
@@ -562,6 +563,7 @@ impl Ppu {
                 self.mask_register = pins.cpu_data;
             }
             2 => {
+                println!("Reading status: {:0>8b} on scanline {}, rendering enabled: {}", self.status_register, self.scanline, self.is_rendering_enabled());
                 pins.cpu_data = self.status_register;
                 self.set_vblank_flag(false);
                 self.w_register = false;
@@ -571,6 +573,7 @@ impl Ppu {
             }
             4 => {
                 if pins.cpu_rw {
+                    println!("Reading OAM");
                     pins.cpu_data = self.oam_memory[self.oam_address_register as usize];
                 } else {
                     self.oam_memory[self.oam_address_register as usize] = pins.cpu_data;
@@ -579,6 +582,7 @@ impl Ppu {
             }
             5 => {
                 if !self.w_register {
+                    println!("Writing to x scroll: {}, {} on scanline {}", pins.cpu_data & 0x07, pins.cpu_data >> 3, self.scanline);
                     self.set_fine_x(pins.cpu_data & 0x07);
                     self.set_course_x(pins.cpu_data >> 3);
                 } else {
@@ -589,17 +593,18 @@ impl Ppu {
             }
             6 => {
                 if !self.w_register {
-                    self.temp_address = (self.temp_address & 0x00FF) | (((pins.cpu_data & 0x3F) as u16) << 8);
+                    self.temp_address = ((pins.cpu_data & 0x3F) as u16) << 8;
                 } else {
                     self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
                     self.vram_address = self.temp_address;
+                    println!("Writing {} to vram address", self.temp_address);
                 }
                 self.w_register = !self.w_register;
             }
             _ => { // assume 7
                 if pins.cpu_rw {
-                    pins.cpu_data = if (0x3F00..=0x3FFF).contains(&self.temp_address) {
-                        let palette_address = (self.temp_address - 0x3F00) % 0x20;
+                    pins.cpu_data = if (0x3F00..=0x3FFF).contains(&self.vram_address) {
+                        let palette_address = (self.vram_address - 0x3F00) % 0x20;
                         self.get_frame_palette(palette_address as usize)
                     } else {
                         self.internal_read_buffer
@@ -772,6 +777,7 @@ impl Ppu {
         self.status_register &= 0b10111111
     }
     fn set_vblank_flag(&mut self, status: bool) {
+        println!("Setting vblank to {}", status);
         self.status_register = (self.status_register & 0b01111111) | ((status as u8) << 7)
     }
 
