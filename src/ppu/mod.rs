@@ -38,14 +38,15 @@ impl PixelBuffer {
         }
     }
     fn set(&mut self, x: u8, lsb: u8, msb: u8, priority: u8, palette: u8, sprite_0: bool) {
-        for i in 0..8 {
+        let max_iter = 8.min(255 - x);
+        for i in 0..max_iter {
             let index = x.wrapping_add(i) as usize;
-            let lsb = lsb >> (7-i) & 1;
-            let msb = msb >> (7-i) & 1;
+            let lsb = (lsb >> (7-i)) & 1;
+            let msb = (msb >> (7-i)) & 1;
             let data = lsb | (msb << 1);
             let existing_data_transparent = self.data[index] & 3 == 0;
             if existing_data_transparent {
-                self.data[index] = data | (palette << 2) | priority << 7 | (u8::from(sprite_0) << 6);
+                self.data[index] = data | (palette << 2) | (priority << 7) | (u8::from(sprite_0) << 6);
             }
         }
     }
