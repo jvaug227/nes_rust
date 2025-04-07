@@ -284,7 +284,6 @@ impl Ppu {
             if self.is_sprite_evaluation_cycle() && self.scanline < 240 {
                 if self.cycle == 65 {
                     // Restart evaluation for next scanline
-                    // println!("Clearing secondary OAM");
                     self.oam_address_register = 0;
                     self.secondary_oam_buffer_count = 0;
                     self.secondary_oam_buffer.fill(None);
@@ -516,7 +515,6 @@ impl Ppu {
         if c == 2 {
             let sprite = self.oam_address_register as usize;
 
-            // println!("Evaluating sprite at oam @{sprite}({})", sprite >> 2);
             let sprite_0_flag = u8::from(sprite == 0) << 2;
             // byte 0 - y position of top of sprite
             let y = self.oam_memory[sprite];
@@ -547,7 +545,6 @@ impl Ppu {
                 // we got a hit!
                 let y_t = if flip_vertically { 7 - y_s } else { y_s } as u16;
                 let tile = ((table as u16) << 12) | ((tile as u16) << 4) | y_t;
-                // println!("Matched sprite {:0>2X} in table {} on scanline {} for y {} ({}), fetching data from {:0>4X}", sprite >> 2, table, self.scanline, y_s, y, tile);
                 // Sprite can be drawn
                 return Some(Some(EvaluatedSprite {
                     x,
@@ -575,7 +572,6 @@ impl Ppu {
                 self.mask_register = pins.cpu_data;
             }
             2 => {
-                // println!("Cpu Reading status register: {:0>8b} during scanline {}, rendering enabled: {}", self.status_register, self.scanline, self.is_rendering_enabled());
                 pins.cpu_data = self.status_register;
                 self.set_vblank_flag(false);
                 self.w_register = false;
@@ -585,7 +581,6 @@ impl Ppu {
             }
             4 => {
                 if pins.cpu_rw {
-                    println!("Reading OAM");
                     pins.cpu_data = self.oam_memory[self.oam_address_register as usize];
                 } else {
                     self.oam_memory[self.oam_address_register as usize] = pins.cpu_data;
@@ -594,7 +589,6 @@ impl Ppu {
             }
             5 => {
                 if !self.w_register {
-                    // println!("Writing to x scroll: {}, {} on scanline {}", pins.cpu_data & 0x07, pins.cpu_data >> 3, self.scanline);
                     self.set_fine_x(pins.cpu_data & 0x07);
                     self.set_course_x(pins.cpu_data >> 3);
                 } else {
@@ -609,7 +603,6 @@ impl Ppu {
                 } else {
                     self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
                     self.vram_address = self.temp_address;
-                    // println!("Writing {} to vram address", self.temp_address);
                 }
                 self.w_register = !self.w_register;
             }
@@ -789,7 +782,6 @@ impl Ppu {
         self.status_register &= 0b10111111
     }
     fn set_vblank_flag(&mut self, status: bool) {
-        // println!("Setting vblank to {}", status);
         self.status_register = (self.status_register & 0b01111111) | ((status as u8) << 7)
     }
 
