@@ -46,19 +46,19 @@ fn draw_cpu(ui: & mut Ui, cpu: &Cpu) {
         draw_cpu_flag(ui, status & 0x01, "C");
     });
     ui.horizontal(|ui: &mut Ui| {
-        ui.label(RichText::new(&format!("PC: ${:#02x}", cpu.pc)));
-        ui.label(RichText::new(&format!("A: ${:#x}", cpu.a)));
-        ui.label(RichText::new(&format!("X: ${:#x}", cpu.x)));
-        ui.label(RichText::new(&format!("Y: ${:#x}", cpu.y)));
+        ui.label(RichText::new(format!("PC: ${:#02x}", cpu.pc)));
+        ui.label(RichText::new(format!("A: ${:#x}", cpu.a)));
+        ui.label(RichText::new(format!("X: ${:#x}", cpu.x)));
+        ui.label(RichText::new(format!("Y: ${:#x}", cpu.y)));
     });
     ui.horizontal(|ui: &mut Ui| {
-        ui.label(RichText::new(&format!("Stack Ptr: ${:#x}", cpu.stkpt)));
-        ui.label(RichText::new(&format!("Fetched: ${:#x}", cpu.fetched)));
-        ui.label(RichText::new(&format!("Addr_data: ${:#x}", cpu.addr_data)));
+        ui.label(RichText::new(format!("Stack Ptr: ${:#x}", cpu.stkpt)));
+        ui.label(RichText::new(format!("Fetched: ${:#x}", cpu.fetched)));
+        ui.label(RichText::new(format!("Addr_data: ${:#x}", cpu.addr_data)));
     });
     ui.horizontal(|ui: &mut Ui| {
-        ui.label(RichText::new(&format!("Opcode: ${:#x}", cpu.opcode)));
-        ui.label(RichText::new(&format!("Pipeline Status: ${:#x?}", cpu.pipeline_status)));
+        ui.label(RichText::new(format!("Opcode: ${:#x}", cpu.opcode)));
+        ui.label(RichText::new(format!("Pipeline Status: ${:#x?}", cpu.pipeline_status)));
     });
 
 }
@@ -419,8 +419,8 @@ impl App {
             ui.separator();
             let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
             let average_fps = 1.0 / frame_time;
-            ui.label(RichText::new(&format!("Frame time: {}", frame_time)));
-            ui.label(RichText::new(&format!("AVG FPS: {:.2}", average_fps)));
+            ui.label(RichText::new(format!("Frame time: {}", frame_time)));
+            ui.label(RichText::new(format!("AVG FPS: {:.2}", average_fps)));
             ui.separator();
             if ui.button("RESET").clicked() { self.nes.reset(); }
             if ui.button("IRQ").clicked() { self.nes.irq(); }

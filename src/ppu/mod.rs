@@ -39,15 +39,15 @@ impl PixelBuffer {
     }
     fn set(&mut self, x: u8, lsb: u8, msb: u8, priority: u8, palette: u8, sprite_0: bool) {
         let max_iter = 8.min(255 - x);
+        let sprite_data = (palette << 2) | (priority << 7) | (u8::from(sprite_0) << 6);
         for i in 0..max_iter {
             let index = x.wrapping_add(i) as usize;
             let lsb = (lsb >> (7-i)) & 1;
             let msb = (msb >> (7-i)) & 1;
-            let data = lsb | (msb << 1);
+            let pixel_data = lsb | (msb << 1);
             let existing_data_transparent = self.data[index] & 3 == 0;
-            if existing_data_transparent {
-                self.data[index] = data | (palette << 2) | (priority << 7) | (u8::from(sprite_0) << 6);
-            }
+            if !existing_data_transparent { continue; }
+            self.data[index] = pixel_data | sprite_data;
         }
     }
     fn get(&self, pixel: u8) -> (u8, u8, bool) {
@@ -284,23 +284,25 @@ impl Ppu {
             if self.is_sprite_evaluation_cycle() && self.scanline < 240 {
                 if self.cycle == 65 {
                     // Restart evaluation for next scanline
+                    // println!("Clearing secondary OAM");
                     self.oam_address_register = 0;
                     self.secondary_oam_buffer_count = 0;
                     self.secondary_oam_buffer.fill(None);
                     self.set_sprite_overflow(false);
                 }
                 let sprite = self.evaluate_sprite();
-                self.oam_address_register = self.oam_address_register.wrapping_add(4);
-                // println!("Incrementing OAM by evaluation");
-                if sprite.is_some() {
-                    if self.secondary_oam_buffer_count < 8 {
-                        // Push evaluated sprites into a back-buffer so as to not replace sprites
-                        // currently in processing
-                        self.secondary_oam_buffer[self.secondary_oam_buffer_count] = sprite;
+                if let Some(sprite) = sprite {
+                    self.oam_address_register = self.oam_address_register.wrapping_add(4);
+                    if sprite.is_some() {
+                        if self.secondary_oam_buffer_count < 8 {
+                            // Push evaluated sprites into a back-buffer so as to not replace sprites
+                            // currently in processing
+                            self.secondary_oam_buffer[self.secondary_oam_buffer_count] = sprite;
+                        } else {
+                            // TODO: Emulate buggy overflow behavior for more than 8 sprites on a scanline
+                            self.set_sprite_overflow(true);
+                        }
                         self.secondary_oam_buffer_count += 1;
-                    } else {
-                        // TODO: Emulate buggy overflow behavior for more than 8 sprites on a scanline
-                        self.set_sprite_overflow(true);
                     }
                 }
             }
@@ -497,7 +499,13 @@ impl Ppu {
         
     }
 
-    fn evaluate_sprite(&mut self) -> Option<EvaluatedSprite> {
+    /// Each sprite is evaluated over a series of 3 cycles. During 2 of the cycles, the return will
+    /// be None. During the actual evaluation cycle, the return will be Some, but the internal
+    /// option will determine if the sprite collided with the line or was skipped.
+    /// Read in a sprite between oam_address_register and oam_address_register+3, then determine
+    /// which line of the sprite should be drawn by evaluating the scanline and attributes. If a
+    /// sprite is hidden off-screen, then it will skipped.
+    fn evaluate_sprite(&mut self) -> Option<Option<EvaluatedSprite>> {
         // Starting from cycle 65, each sprite takes 3 cycles each
         let c = (self.cycle - 65) % 3;
         let s = (self.scanline) as u8;
@@ -507,6 +515,8 @@ impl Ppu {
         // cycles as there is no outside bus interaction
         if c == 2 {
             let sprite = self.oam_address_register as usize;
+
+            // println!("Evaluating sprite at oam @{sprite}({})", sprite >> 2);
             let sprite_0_flag = u8::from(sprite == 0) << 2;
             // byte 0 - y position of top of sprite
             let y = self.oam_memory[sprite];
@@ -538,13 +548,18 @@ impl Ppu {
                 let y_t = if flip_vertically { 7 - y_s } else { y_s } as u16;
                 let tile = ((table as u16) << 12) | ((tile as u16) << 4) | y_t;
                 // println!("Matched sprite {:0>2X} in table {} on scanline {} for y {} ({}), fetching data from {:0>4X}", sprite >> 2, table, self.scanline, y_s, y, tile);
-                return Some(EvaluatedSprite {
+                // Sprite can be drawn
+                return Some(Some(EvaluatedSprite {
                     x,
                     attrib,
                     tile,
-                });
+                }));
+            } else {
+                // Sprite was skipped
+                return Some(None);
             }
         }
+        // Not a valid cycle
         None
     }
 
@@ -672,7 +687,7 @@ impl Ppu {
     }
 
     fn is_sprite_evaluation_cycle(&self) -> bool {
-        (65..257).contains(&self.cycle)
+        (65..=257).contains(&self.cycle)
     }
 
     /// This starts at cycle 258 to account for the fact that the MSB byte is *not* addressed
