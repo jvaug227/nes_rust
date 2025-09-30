@@ -2,7 +2,10 @@ use anyhow::{anyhow, Result};
 use egui::{Color32, Pos2, RichText, TextureId, Ui};
 use nes::NESBoard;
 use nes_rust::{cartidge::CartridgeData, cpu::*};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU16, AtomicU32, AtomicU8, AtomicUsize},
+    Arc,
+};
 use wgpu::Backends;
 use winit::{
     application::ApplicationHandler,
@@ -157,6 +160,12 @@ struct App {
     last_time: std::time::Instant,
     frame_time_start: std::time::Instant,
     frame_time_end: std::time::Instant,
+    stream: cpal::Stream,
+    freq: Arc<AtomicU32>,
+    volume: Arc<AtomicU16>,
+    sound_fn: Arc<AtomicU8>,
+    h: Arc<AtomicUsize>,
+    fcycle: Arc<AtomicU32>,
     // At bottom to maintain destroy order
     gpu: Gpu,
 }
@@ -164,6 +173,82 @@ struct App {
 impl App {
     fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Self {
         let cpu = Cpu::new();
+
+        use cpal::traits::DeviceTrait;
+        use cpal::traits::HostTrait;
+        use cpal::traits::StreamTrait;
+        use cpal::Sample;
+        let host = cpal::default_host();
+        let maybe_device = HostTrait::default_output_device(&host);
+        let device = maybe_device.expect("I dont care, gimme an output device");
+        let mut supported_config_range = DeviceTrait::supported_output_configs(&device)
+            .expect("I dont care, gimme a config range");
+        let supported_config = supported_config_range
+            .next()
+            .expect("I dont care, gimme a config")
+            .with_sample_rate(cpal::SampleRate(44100));
+        let supported_config = supported_config.into();
+        let freq = Arc::new(AtomicU32::new(440));
+        let sound_fn = Arc::new(AtomicU8::new(0));
+        let volume = Arc::new(AtomicU16::new(5));
+        let h = Arc::new(AtomicUsize::new(2));
+        let fcycle = Arc::new(AtomicU32::new(60));
+        let sample_rate = 44100.0;
+        let mut sample_index = 0.0;
+        let stream = device
+            .build_output_stream(
+                &supported_config,
+                {
+                    let freq = freq.clone();
+                    let volume = volume.clone();
+                    let sound_fn = sound_fn.clone();
+                    let h = h.clone();
+                    let fcycle = fcycle.clone();
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        fn sample_sin(freq: f64, time: f64) -> f64 {
+                            f64::sin(std::f64::consts::TAU * freq * time)
+                        }
+                        fn sample_square(freq: f64, time: f64, h: usize, f_cycle: f64) -> f64 {
+                            let mut a = 0.0;
+                            let mut b = 0.0;
+                            let p = std::f64::consts::TAU * f_cycle;
+                            for n in 1..h {
+                                let f_n = n as f64;
+                                let c = f_n * freq * std::f64::consts::TAU * time;
+                                a += f64::sin(c) / f_n;
+                                b += f64::sin((c - p) * f_n) / f_n;
+                            }
+                            std::f64::consts::FRAC_2_PI * (a - b)
+                        }
+                        // let time: f64 = std::time::Instant::now().duration_since(initial_timestamp).as_secs_f64();
+                        let volume: f64 = (1.0
+                            + f64::from(volume.load(std::sync::atomic::Ordering::Relaxed))
+                                / 1000.0)
+                            .log2();
+                        let freq: f64 = freq.load(std::sync::atomic::Ordering::Relaxed).into();
+                        let sound_fn: u8 = sound_fn.load(std::sync::atomic::Ordering::Relaxed);
+                        let h: usize = h.load(std::sync::atomic::Ordering::Relaxed);
+                        let fcycle: f64 =
+                            (fcycle.load(std::sync::atomic::Ordering::Relaxed) as f64) / 1000.0;
+                        for sample in data.iter_mut() {
+                            let time = sample_index / sample_rate;
+                            let raw_sample = volume
+                                * match sound_fn {
+                                    0 => sample_sin(freq, time),
+                                    _ => sample_square(freq, time, h, fcycle),
+                                };
+                            *sample = raw_sample.to_sample::<f32>();
+                            sample_index = (sample_index + 1.0) % sample_rate;
+                        }
+                    }
+                },
+                move |err| {
+                    eprintln!("{err}");
+                },
+                None,
+            )
+            .unwrap();
+        stream.play().unwrap();
 
         let program_path = {
             let mut args = std::env::args();
@@ -323,6 +408,13 @@ impl App {
             last_time: std::time::Instant::now(),
             frame_time_start: std::time::Instant::now(),
             frame_time_end: std::time::Instant::now(),
+
+            stream,
+            freq,
+            volume,
+            sound_fn,
+            h,
+            fcycle,
         }
     }
 
@@ -549,6 +641,28 @@ impl App {
             if ui.button("RESET").clicked() { self.nes.reset(); }
             if ui.button("IRQ").clicked() { self.nes.irq(); }
             if ui.button("NMI").clicked() { self.nes.nmi(); }
+            {
+                let mut m_sound_fn = self.sound_fn.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::Slider::new(&mut m_sound_fn, 0..=4).text("Sound Fn"));
+                self.sound_fn.store(m_sound_fn, std::sync::atomic::Ordering::Relaxed);
+
+                let mut m_vol = self.volume.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::Slider::new(&mut m_vol, 0..=1000).text("Volume"));
+                self.volume.store(m_vol, std::sync::atomic::Ordering::Relaxed);
+
+                let mut m_freq = f64::from(self.freq.load(std::sync::atomic::Ordering::Relaxed));
+                ui.add(egui::Slider::new(&mut m_freq, 0.0..=1000.0).text("Frequency"));
+                self.freq.store(m_freq as u32, std::sync::atomic::Ordering::Relaxed);
+
+                let mut m_h: usize = self.h.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::Slider::new(&mut m_h, 2..=255).text("H"));
+                self.h.store(m_h, std::sync::atomic::Ordering::Relaxed);
+
+                let mut m_fcycle = self.fcycle.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::Slider::new(&mut m_fcycle, 0..=1000).text("FCycle"));
+                self.fcycle.store(m_fcycle, std::sync::atomic::Ordering::Relaxed);
+
+            }
             ui.separator();
             ui.collapsing("Debug Information", |ui| {
                 Self::upload_nes_nametable_texture(gpu, &self.nes, &self.nametable_texture, &mut self.nametable_texture_buffer);

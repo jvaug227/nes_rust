@@ -33,6 +33,7 @@
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
+              alsa-lib
               cargo
               clippy
               rustc

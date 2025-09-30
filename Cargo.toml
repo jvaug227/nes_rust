@@ -11,8 +11,11 @@ path = "src/lib.rs"
 
 [dependencies]
 bitflags = "2.6.0"
+cpal = { version = "0.16", optional = true }
 
 [features]
+default = [ "audio", "overflowing-add" ]
+audio = [ "dep:cpal" ]
 overflowing-add = []
 
 [dev-dependencies]

@@ -34,9 +34,9 @@ impl NESBoard {
         let mut ppu = Ppu::new();
         let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
         let prg_ram = vec![0u8; ram_size as usize];
-        // let palette_file = include_bytes!("../../src/ntscpalette.pal");
+        let palette_file = include_bytes!("../../src/ntscpalette.pal");
         // let palette_file = include_bytes!("../../src/2C02G_wiki.pal");
-        let palette_file = include_bytes!("../../src/Composite_wiki.pal");
+        // let palette_file = include_bytes!("../../src/Composite_wiki.pal");
         let system_palette: &[u8; 64*3] = palette_file.first_chunk().expect("Palette file did not have 64 RGB entries");
         ppu.set_palette(system_palette);
         NESBoard {
