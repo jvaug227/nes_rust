@@ -512,6 +512,8 @@ impl Ppu {
         // Evaluate only on the last cycle of each sprite,
         // no need to perfectly emulate the evaluation in over multiple 
         // cycles as there is no outside bus interaction
+        // TODO: Check if oam[(sprite + offset) % 256] is necessary, and/or how to fix wrapping
+        // around the edge
         if c == 2 {
             let sprite = self.oam_address_register as usize;
 
@@ -523,7 +525,7 @@ impl Ppu {
             //  8x16 tile - 1 bit table + 7-bit (ignores the pattern bit in control register, uses
             //  the bit in the byte). This works because the tiles are consecutive and byte 255 can
             //  only be used in this case if the tile address is 254.
-            let tile = self.oam_memory[sprite+1];
+            let tile = self.oam_memory[(sprite+1) % 256];
             // byte 2 - attributes
             //  2-bit palette
             //  3-bit unused
@@ -531,9 +533,9 @@ impl Ppu {
             //  1-bit flip horizontally
             //  1-bit flip vertically
             // Insert sprite-0 into unused field at bit 2
-            let attrib = self.oam_memory[sprite+2] | sprite_0_flag;
+            let attrib = self.oam_memory[(sprite+2) % 256] | sprite_0_flag;
             // byte 3 - left x position
-            let x = self.oam_memory[sprite+3];
+            let x = self.oam_memory[(sprite+3) % 256];
 
             let (table, tile, sprite_height) = if self.sprite_size() { (tile & 1, tile >> 1, 16) } else { (self.sprite_pattern_table(), tile, 8) };
 

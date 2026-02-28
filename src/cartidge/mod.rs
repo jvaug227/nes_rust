@@ -8,6 +8,7 @@ pub struct CartridgeData {
     pub trainer_range: Option<Range<usize>>,
     pub prg_rom_range: Range<usize>,
     pub chr_rom_range: Option<Range<usize>>,
+    pub prg_ram_size: usize,
     pub playchoice_rom_range: Option<Range<usize>>,
     pub playchoice_prom_range: Option<Range<usize>>,
     pub nametable_arrangement: NameTableArrangement,
@@ -47,13 +48,13 @@ impl CartridgeData {
                 0x04 => CartidgeFileFormat::INESArchaic,
                 0x00 => CartidgeFileFormat::INES,
                 _ => CartidgeFileFormat::INESArchaic,
-            } 
-        }
-        else if is_tnes_name {
+            }
+        } else if is_tnes_name {
             CartidgeFileFormat::TNES
-        }
-        else { unimplemented!() }; 
-        
+        } else {
+            unimplemented!()
+        };
+
         match format {
             CartidgeFileFormat::INESArchaic => {
                 let ines_archaic_data = INESArchaicFormat::decode(program);
@@ -63,7 +64,7 @@ impl CartridgeData {
                     offset += 512usize;
                     let end = offset;
                     Some(begin..end)
-                }  else {
+                } else {
                     None
                 };
 
@@ -87,6 +88,7 @@ impl CartridgeData {
                     }
                 };
 
+
                 let playchoice_rom_range = None;
                 let playchoice_prom_range = None;
 
@@ -94,12 +96,15 @@ impl CartridgeData {
                 let nametable_alternate = ines_archaic_data.alternative_nametable_layout;
 
                 let battery = ines_archaic_data.non_volatile_data;
+                // If battery-backed, insert 8KiB ram; otherwise open-bus
+                let prg_ram_size = if battery { 8192 } else { 0 };
                 let title = None;
                 let mapper = ines_archaic_data.mapper;
                 Self {
                     trainer_range,
                     prg_rom_range,
                     chr_rom_range,
+                    prg_ram_size,
                     playchoice_rom_range,
                     playchoice_prom_range,
                     nametable_arrangement,
@@ -108,7 +113,7 @@ impl CartridgeData {
                     title,
                     mapper,
                 }
-            },
+            }
             CartidgeFileFormat::INES => {
                 let base = INESArchaicFormat::decode(program);
                 let ines_data = INESFormat::decode(program, base);
@@ -119,7 +124,7 @@ impl CartridgeData {
                     offset += 512usize;
                     let end = offset;
                     Some(begin..end)
-                }  else {
+                } else {
                     None
                 };
 
@@ -152,10 +157,15 @@ impl CartridgeData {
                 let battery = ines_data.base.non_volatile_data;
                 let title = None;
                 let mapper = ines_data.base.mapper;
+
+                // If using INES prg-ram specification, insert max(1, N) 8KiB banks of prg-ram
+                // If battery-backed, insert 8KiB ram; otherwise open-bus
+                let prg_ram_size = if ines_data.prg_ram_present_bit { ines_data.prg_ram_size.max(1) * 8192 } else if battery { 8192 } else { 0 };
                 Self {
                     trainer_range,
                     prg_rom_range,
                     chr_rom_range,
+                    prg_ram_size,
                     playchoice_rom_range,
                     playchoice_prom_range,
                     nametable_arrangement,
@@ -164,7 +174,7 @@ impl CartridgeData {
                     title,
                     mapper,
                 }
-            },
+            }
             CartidgeFileFormat::NES2 => {
                 let base = INESArchaicFormat::decode(program);
                 let ines2_data = INES2Format::decode(program, base);
@@ -175,7 +185,7 @@ impl CartridgeData {
                     offset += 512usize;
                     let end = offset;
                     Some(begin..end)
-                }  else {
+                } else {
                     None
                 };
 
@@ -199,6 +209,9 @@ impl CartridgeData {
                     }
                 };
 
+                // INes2.0 has an official prg-ram size
+                let prg_ram_size = 64 << ines2_data.prg_ram_shift_count;
+
                 let playchoice_rom_range = None;
                 let playchoice_prom_range = None;
 
@@ -213,6 +226,7 @@ impl CartridgeData {
                     trainer_range,
                     prg_rom_range,
                     chr_rom_range,
+                    prg_ram_size,
                     playchoice_rom_range,
                     playchoice_prom_range,
                     nametable_arrangement,
@@ -221,7 +235,7 @@ impl CartridgeData {
                     title,
                     mapper,
                 }
-            },
+            }
             _ => {
                 let tnes_data = TNESFormat::decode(program);
                 let mut offset = 16usize;
@@ -246,6 +260,8 @@ impl CartridgeData {
                         Some(begin..end)
                     }
                 };
+
+                let prg_ram_size = tnes_data.wram * 8192;
 
                 let playchoice_rom_range = None;
                 let playchoice_prom_range = None;
@@ -273,6 +289,7 @@ impl CartridgeData {
                     trainer_range,
                     prg_rom_range,
                     chr_rom_range,
+                    prg_ram_size,
                     playchoice_rom_range,
                     playchoice_prom_range,
                     nametable_arrangement,
@@ -281,7 +298,7 @@ impl CartridgeData {
                     title,
                     mapper,
                 }
-            },
+            }
         }
     }
 }
@@ -318,13 +335,16 @@ enum ExtraHardwareInfo {
 }
 
 struct INESArchaicFormat {
-    prg_rom_size: usize, // 16KB ROM Banks
-    chr_rom_size: usize, // 8KB VROM Banks
+    /// Count 16KB ROM Banks
+    prg_rom_size: usize,
+    /// Count 8KB VROM Banks
+    chr_rom_size: usize,
     nametable_arrangement: NameTableArrangement,
     non_volatile_data: bool,
     contains_trainer: bool,
-    alternative_nametable_layout: bool, // different meanings, but generally a 4-screen layout
-    mapper: usize, // END Archaic INES
+    /// different meanings, but generally a 4-screen layout
+    alternative_nametable_layout: bool, 
+    mapper: usize,
 }
 
 impl INESArchaicFormat {
@@ -335,13 +355,17 @@ impl INESArchaicFormat {
         let prg_rom_size = usize::from(byte4);
         let chr_rom_size = usize::from(byte5);
 
-        let nametable_arrangement = if byte6 & 0x01 == 0 { NameTableArrangement::HORIZONTAL } else { NameTableArrangement::VERTICAL };
+        let nametable_arrangement = if byte6 & 0x01 == 0 {
+            NameTableArrangement::HORIZONTAL
+        } else {
+            NameTableArrangement::VERTICAL
+        };
         let non_volatile_data = (byte6 & 0x02) > 0;
         let contains_trainer = (byte6 & 0x04) > 0;
         let alternative_nametable_layout = (byte6 & 0x08) > 0;
 
         let mapper = usize::from(byte6 >> 4);
-        
+
         Self {
             prg_rom_size,
             chr_rom_size,
@@ -349,7 +373,7 @@ impl INESArchaicFormat {
             non_volatile_data,
             contains_trainer,
             alternative_nametable_layout,
-            mapper
+            mapper,
         }
     }
 
@@ -364,9 +388,12 @@ impl INESArchaicFormat {
 
 struct INESFormat {
     base: INESArchaicFormat,
-    vs_unisystem: bool, // byte 7
-    playchoice: bool, // byte 7
-    prg_ram_size: usize, // byte 8 - 8KB RAM Banks
+    vs_unisystem: bool,           // byte 7
+    playchoice: bool,             // byte 7
+    /// Count 8KB banks (min 1 bank)
+    /// Recent addition to the INES spec
+    prg_ram_size: usize,          // byte 8 - 8KB RAM Banks
+    /// NTSC or PAL
     tv_system: TVSystem, // byte 9 - if this is 0 and tv_system_2 is non-zero, use tv_system_2
     tv_system_2: TVSystem, // byte 10 - unofficial
     prg_ram_present_bit: bool, // byte 10 - unofficial
@@ -386,7 +413,11 @@ impl INESFormat {
 
         let prg_ram_size = usize::from(byte8);
 
-        let tv_system = if byte9 == 0 { TVSystem::Ntsc } else { TVSystem::Pal };
+        let tv_system = if byte9 == 0 {
+            TVSystem::Ntsc
+        } else {
+            TVSystem::Pal
+        };
 
         let tv_system_2 = match byte10 & 0b11 {
             0 => TVSystem::Ntsc,
@@ -413,7 +444,7 @@ impl INESFormat {
             tv_system,
             tv_system_2,
             prg_ram_present_bit,
-            contains_bus_conflicts
+            contains_bus_conflicts,
         }
     }
 
@@ -430,15 +461,35 @@ struct INES2Format {
     base: INESArchaicFormat,
     console_type: ConsoleType,
     submapper: u8,
+    /// Size := 64 << shift_count
     prg_ram_shift_count: u8,
+    /// Size := 64 << shift_count
     prg_nvram_shift_count: u8,
     prg_rom_msb: usize,
     chr_rom_msb: usize,
-    chr_ram_size: u8,
-    chr_nvram_size: u8,
+    /// Size := 64 << shift_count
+    chr_ram_shift_count: u8,
+    /// Size := 64 << shift_count
+    chr_nvram_shift_count: u8,
+    /// Determines which timings should be used for the CPU and PPU, as certain games can work on
+    /// one or multiple systems.
+    /// Determining timings based on region can be implemented following https://www.nesdev.org/wiki/NES_2.0#CPU/PPU_Timing
     timing_mode: TimingMode,
+    /// If console type is "extended" or a "vs system"
+    /// - Extended: expands the list of potential console types
+    /// - VS System: specifies the console as a VS System console and the PPU type
     extra_hardware_info: Option<ExtraHardwareInfo>,
+    /// Immediately follows CHR-ROM, and size can be deduced by
+    /// FILE_SIZE-(Header+Trainer+PRG_ROM+CHR_ROM)
+    /// Usage depends on console type and mapper:
+    /// - Playchoice: 3 Misc roms for 8KiB INST, 16B PROM, 16B PROM Counter Out.
+    /// - VT369: 4KiB embedded ROM
+    /// - INES Mapper 086 sub 1: Speed Data ROM
+    /// - INES 2.0 Mappper 355: Protection Embedded ROM for PIC16C54 microcontroller
+    /// - INES 2.0 Mapper 561 / 562: Trainers with unconventional sizes or locations
     miscellaneous_roms: u8,
+    /// Optional Expansion Devices such as unique controllers or keyboards.
+    /// TODO: Explore how to integrate expansion devices.
     default_expansion_device: u8,
 }
 
@@ -461,7 +512,7 @@ impl INES2Format {
             _ => ConsoleType::Nes,
         };
         let mapper_middle_half = usize::from(byte7 & 0b11110000);
-        
+
         let mapper_upper_half = usize::from(byte8 & 0b00001111) << 8;
         let submapper = byte8 >> 4;
 
@@ -482,8 +533,13 @@ impl INES2Format {
         };
 
         let extra_hardware_info = match &console_type {
-            ConsoleType::Nvs => Some(ExtraHardwareInfo::VSSystemType { ppu_type: byte13 & 0b00001111, hardware_type: byte13 >> 4 }),
-            ConsoleType::Extended => Some(ExtraHardwareInfo::ExtendedConsole { extended_console_type: byte13 & 0b00001111 }),
+            ConsoleType::Nvs => Some(ExtraHardwareInfo::VSSystemType {
+                ppu_type: byte13 & 0b00001111,
+                hardware_type: byte13 >> 4,
+            }),
+            ConsoleType::Extended => Some(ExtraHardwareInfo::ExtendedConsole {
+                extended_console_type: byte13 & 0b00001111,
+            }),
             _ => None,
         };
 
@@ -501,12 +557,12 @@ impl INES2Format {
             prg_nvram_shift_count,
             prg_rom_msb,
             chr_rom_msb,
-            chr_ram_size,
-            chr_nvram_size,
+            chr_ram_shift_count: chr_ram_size,
+            chr_nvram_shift_count: chr_nvram_size,
             timing_mode,
             extra_hardware_info,
             miscellaneous_roms,
-            default_expansion_device
+            default_expansion_device,
         }
     }
 
@@ -517,9 +573,8 @@ impl INES2Format {
             let ee = (base & 0b11111100) >> 2;
             2usize.pow(ee as u32) * mm
         } else {
-            16384 * (base | (self.prg_rom_msb << 8)) 
+            16384 * (base | (self.prg_rom_msb << 8))
         }
-        
     }
 
     fn calculate_chr_rom_size(&self) -> usize {
@@ -531,16 +586,20 @@ impl INES2Format {
         } else {
             8192 * (base | (self.chr_rom_msb << 8))
         }
-        
     }
 }
 
 struct TNESFormat {
+    /// Uses T-NES codes
     mapper: u8,
-    prg_rom_size: usize, // 8192 byte banks
-    chr_rom_size: usize, // 8192 byte banks
+    /// Count of 8192 banks
+    prg_rom_size: usize,
+    /// Count of 8192 banks
+    chr_rom_size: usize,
+    /// boolean for 0 or 8192
     wram: usize,
     mirroring: NameTableArrangement,
+    /// Battery present
     non_volatile_data: bool,
 }
 
@@ -564,7 +623,6 @@ impl TNESFormat {
         };
         let non_volatile_data = byte9 != 0;
 
-        
         Self {
             mapper,
             prg_rom_size,

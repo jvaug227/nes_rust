@@ -478,7 +478,7 @@ impl Cpu {
         if is_ir_stage && phi {
             self.opcode = *data_bus;
             if !self.suppresses_pc_increment() {
-                self.pc += 1;
+                self.pc = self.pc.wrapping_add(1);
             }
             if self.do_hardware_interrupt() {
                 self.opcode = 0;

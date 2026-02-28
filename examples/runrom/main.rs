@@ -4,7 +4,7 @@ use nes::NESBoard;
 use nes_rust::{cartidge::CartridgeData, cpu::*};
 use std::sync::{
     atomic::{AtomicU16, AtomicU32, AtomicU8, AtomicUsize},
-    Arc,
+    Arc, RwLock,
 };
 use wgpu::Backends;
 use winit::{
@@ -17,18 +17,6 @@ use winit::{
 };
 
 mod nes;
-
-// fn draw_ram(ui: & mut Ui, ram: &[u8], addr: u16, rows: u32, cols: usize) {
-//     ui.vertical_centered_justified(|ui| {
-//         for row in 0..rows {
-//             let row_addr = addr as usize + (cols * row as usize);
-//             let end = row_addr + cols;
-//
-//             ui.label(format!("\t${:04X?}:\t{:02X?}", row_addr, &ram[row_addr..end]));
-//         }
-//     });
-//
-// }
 
 fn draw_cpu_flag(ui: &mut Ui, value: u8, text: &str) {
     let color = if value > 0 {
@@ -144,7 +132,7 @@ impl EguiIntegrator {
 }
 
 struct App {
-    nes: NESBoard,
+    nes: Arc<RwLock<NESBoard>>,
     egui: EguiIntegrator,
     frame_texture: wgpu::Texture,
     frame_texture_id: TextureId,
@@ -173,82 +161,6 @@ struct App {
 impl App {
     fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Self {
         let cpu = Cpu::new();
-
-        use cpal::traits::DeviceTrait;
-        use cpal::traits::HostTrait;
-        use cpal::traits::StreamTrait;
-        use cpal::Sample;
-        let host = cpal::default_host();
-        let maybe_device = HostTrait::default_output_device(&host);
-        let device = maybe_device.expect("I dont care, gimme an output device");
-        let mut supported_config_range = DeviceTrait::supported_output_configs(&device)
-            .expect("I dont care, gimme a config range");
-        let supported_config = supported_config_range
-            .next()
-            .expect("I dont care, gimme a config")
-            .with_sample_rate(cpal::SampleRate(44100));
-        let supported_config = supported_config.into();
-        let freq = Arc::new(AtomicU32::new(440));
-        let sound_fn = Arc::new(AtomicU8::new(0));
-        let volume = Arc::new(AtomicU16::new(5));
-        let h = Arc::new(AtomicUsize::new(2));
-        let fcycle = Arc::new(AtomicU32::new(60));
-        let sample_rate = 44100.0;
-        let mut sample_index = 0.0;
-        let stream = device
-            .build_output_stream(
-                &supported_config,
-                {
-                    let freq = freq.clone();
-                    let volume = volume.clone();
-                    let sound_fn = sound_fn.clone();
-                    let h = h.clone();
-                    let fcycle = fcycle.clone();
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        fn sample_sin(freq: f64, time: f64) -> f64 {
-                            f64::sin(std::f64::consts::TAU * freq * time)
-                        }
-                        fn sample_square(freq: f64, time: f64, h: usize, f_cycle: f64) -> f64 {
-                            let mut a = 0.0;
-                            let mut b = 0.0;
-                            let p = std::f64::consts::TAU * f_cycle;
-                            for n in 1..h {
-                                let f_n = n as f64;
-                                let c = f_n * freq * std::f64::consts::TAU * time;
-                                a += f64::sin(c) / f_n;
-                                b += f64::sin((c - p) * f_n) / f_n;
-                            }
-                            std::f64::consts::FRAC_2_PI * (a - b)
-                        }
-                        // let time: f64 = std::time::Instant::now().duration_since(initial_timestamp).as_secs_f64();
-                        let volume: f64 = (1.0
-                            + f64::from(volume.load(std::sync::atomic::Ordering::Relaxed))
-                                / 1000.0)
-                            .log2();
-                        let freq: f64 = freq.load(std::sync::atomic::Ordering::Relaxed).into();
-                        let sound_fn: u8 = sound_fn.load(std::sync::atomic::Ordering::Relaxed);
-                        let h: usize = h.load(std::sync::atomic::Ordering::Relaxed);
-                        let fcycle: f64 =
-                            (fcycle.load(std::sync::atomic::Ordering::Relaxed) as f64) / 1000.0;
-                        for sample in data.iter_mut() {
-                            let time = sample_index / sample_rate;
-                            let raw_sample = volume
-                                * match sound_fn {
-                                    0 => sample_sin(freq, time),
-                                    _ => sample_square(freq, time, h, fcycle),
-                                };
-                            *sample = raw_sample.to_sample::<f32>();
-                            sample_index = (sample_index + 1.0) % sample_rate;
-                        }
-                    }
-                },
-                move |err| {
-                    eprintln!("{err}");
-                },
-                None,
-            )
-            .unwrap();
-        stream.play().unwrap();
 
         let program_path = {
             let mut args = std::env::args();
@@ -296,16 +208,19 @@ impl App {
             .clone()
             .map(|range| program[range].to_vec())
             .unwrap_or_default();
-        let program_ram_size = 0;
 
-        let nes = NESBoard::new(
+        let program_ram_size = cartridge_data.prg_ram_size;
+        println!("Cartidge WRam: {} bytes", program_ram_size);
+
+        let nes = Arc::new(RwLock::new(NESBoard::new(
             cpu,
             internal_ram,
             internal_vram,
             program_rom,
             character_rom,
             program_ram_size,
-        );
+        )));
+
         let gpu = pollster::block_on(App::create_gpu_struct(event_loop)).unwrap();
 
         let mut egui = EguiIntegrator::new(&gpu);
@@ -364,7 +279,7 @@ impl App {
         );
         Self::upload_nes_pattern_table_textures(
             &gpu,
-            &nes,
+            &nes.read().expect("RW_LOCK_POISONED"),
             &pattern_table_1_texture,
             &pattern_table_2_texture,
         );
@@ -390,6 +305,16 @@ impl App {
             &nametable_texture_view,
             wgpu::FilterMode::Nearest,
         );
+
+        let freq = Arc::new(AtomicU32::new(440));
+        let sound_fn = Arc::new(AtomicU8::new(0));
+        let volume = Arc::new(AtomicU16::new(5));
+        let h = Arc::new(AtomicUsize::new(2));
+        let fcycle = Arc::new(AtomicU32::new(60));
+
+        let stream = Self::build_audio_stream(&nes, &volume).expect("Could not build audio stream");
+        // stream.play().unwrap();
+
         Self {
             nes,
             gpu,
@@ -416,6 +341,125 @@ impl App {
             h,
             fcycle,
         }
+    }
+
+    fn build_audio_stream(nes: &Arc<RwLock<NESBoard>>, volume: &Arc<AtomicU16>) -> Option<cpal::Stream> {
+        use cpal::traits::DeviceTrait;
+        use cpal::traits::HostTrait;
+        use cpal::Sample;
+        let host = cpal::default_host();
+        let maybe_device = HostTrait::default_output_device(&host);
+        let device = maybe_device.expect("I dont care, gimme an output device");
+        let mut supported_config_range = DeviceTrait::supported_output_configs(&device)
+            .expect("I dont care, gimme a config range");
+        // let supported_config = supported_config_range
+        //     .next()
+        //     .expect("I dont care, gimme a config")
+        //     .with_sample_rate(SampleRate(44100));
+        let supported_config = cpal::SupportedStreamConfig::new(
+            1,
+            44100,
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
+        );
+        const DEFAULT_BUFFER_SIZE: u32 = 512;
+        let valid_buffer_range = {
+            let supported_buffer_range = supported_config.buffer_size();
+            match supported_buffer_range {
+                cpal::SupportedBufferSize::Range { min, max } => *min..*max,
+                cpal::SupportedBufferSize::Unknown => DEFAULT_BUFFER_SIZE..44100,
+            }
+        };
+        let audio_buffer_size = if valid_buffer_range.contains(&DEFAULT_BUFFER_SIZE) {
+            println!(
+                "DEFAULT_BUFFER_SIZE({}) is within range",
+                DEFAULT_BUFFER_SIZE
+            );
+            DEFAULT_BUFFER_SIZE
+        } else {
+            println!(
+                "DEFAULT_BUFFER_SIZE({}) not within range, choosing min of {:?}",
+                DEFAULT_BUFFER_SIZE, valid_buffer_range
+            );
+            valid_buffer_range
+                .min()
+                .expect("NO_VALID_AUDIO_BUFFER_RANGE")
+        };
+        let mut supported_config = supported_config.config();
+        supported_config.buffer_size = cpal::BufferSize::Fixed(audio_buffer_size);
+        println!("{:?}", supported_config);
+        let sample_rate = 44100.0;
+        let mut sample_index = 0.0;
+        let stream = device
+            .build_output_stream(
+                &supported_config,
+                {
+                    let nes = nes.clone();
+                    // let freq = freq.clone();
+                    let volume = volume.clone();
+                    // let sound_fn = sound_fn.clone();
+                    // let h = h.clone();
+                    // let fcycle = fcycle.clone();
+                    let mut sample_buffer: Vec<f64> = Vec::with_capacity(512);
+                    move |data: &mut [f32], _oc: &cpal::OutputCallbackInfo| {
+                        // Batch enough samples by clocking the emulator while write-locked
+                        {
+                            let total_needed_samples = data.len();
+                            sample_buffer.resize(total_needed_samples, 0.0);
+                            let mut _nes = nes.write().expect("QUIB_RW_LOCK_POISONED");
+                            for _needed_sample in sample_buffer.iter_mut() {
+                                *_needed_sample = loop {
+                                    if let Some(res) = _nes.clock(false) {
+                                        break res;
+                                    }
+                                }
+                            }
+                        }
+
+                        // println!("{}", data.len());
+                        fn sample_sin(freq: f64, time: f64) -> f64 {
+                            f64::sin(std::f64::consts::TAU * freq * time)
+                        }
+                        fn sample_square(freq: f64, time: f64, h: usize, f_cycle: f64) -> f64 {
+                            let mut a = 0.0;
+                            let mut b = 0.0;
+                            let p = std::f64::consts::TAU * f_cycle;
+                            for n in 1..h {
+                                let f_n = n as f64;
+                                let c = f_n * freq * std::f64::consts::TAU * time;
+                                a += f64::sin(c) / f_n;
+                                b += f64::sin((c - p) * f_n) / f_n;
+                            }
+                            std::f64::consts::FRAC_2_PI * (a - b)
+                        }
+                        // let time: f64 = std::time::Instant::now().duration_since(initial_timestamp).as_secs_f64();
+                        let volume: f64 = (1.0
+                            + f64::from(volume.load(std::sync::atomic::Ordering::Relaxed))
+                                / 1000.0)
+                            .log2();
+                        // let freq: f64 = freq.load(std::sync::atomic::Ordering::Relaxed).into();
+                        // let sound_fn: u8 = sound_fn.load(std::sync::atomic::Ordering::Relaxed);
+                        // let h: usize = h.load(std::sync::atomic::Ordering::Relaxed);
+                        // let fcycle: f64 =
+                        // (fcycle.load(std::sync::atomic::Ordering::Relaxed) as f64) / 1000.0;
+                        for i in 0..data.len() {
+                            // let time = sample_index / sample_rate;
+                            // let raw_sample = volume
+                            //     * match sound_fn {
+                            //         0 => sample_sin(freq, time),
+                            //         _ => sample_square(freq, time, h, fcycle),
+                            //     };
+                            data[i] = f64::to_sample(volume * sample_buffer[i]); //.to_sample::<f32>();
+                            sample_index = (sample_index + 1.0) % sample_rate;
+                        }
+                    }
+                },
+                move |err| {
+                    eprintln!("{err}");
+                },
+                None,
+            );
+        stream.ok()
     }
 
     async fn create_gpu_struct(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<Gpu> {
@@ -597,27 +641,29 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("encoder"),
             });
-        gpu.queue().write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.frame_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            // The actual pixel data
-            self.nes.video_memory(),
-            // The layout of the texture
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * 256),
-                rows_per_image: Some(240),
-            },
-            wgpu::Extent3d {
-                width: 256,
-                height: 240,
-                depth_or_array_layers: 1,
-            },
-        );
+        {
+            gpu.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.frame_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                // The actual pixel data
+                self.nes.read().expect("RW_LOCK_POISONED").video_memory(),
+                // The layout of the texture
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * 256),
+                    rows_per_image: Some(240),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 240,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
         let output_frame = gpu.surface().get_current_texture()?;
         let output_view = output_frame
             .texture
@@ -631,16 +677,22 @@ impl App {
 
             ui.label("SPACE = Continuous Run    F = Run Frame Worth of Cycles    P = Step Cycle    O = Dump PPU Data");
             ui.label("W = UP    S = DOWN    A = LEFT    D = RIGHT    H = A    J = B    K = SELECT    L = START");
-            draw_cpu(ui, self.nes.cpu());
+            {
+                let nes = self.nes.read().expect("RW_LOCK_POISONED");
+                draw_cpu(ui, nes.cpu());
+            }
             ui.separator();
             let frame_time = (self.frame_time_end - self.frame_time_start).as_secs_f64();
             let average_fps = 1.0 / frame_time;
             ui.label(RichText::new(format!("Frame time: {}", frame_time)));
             ui.label(RichText::new(format!("AVG FPS: {:.2}", average_fps)));
             ui.separator();
-            if ui.button("RESET").clicked() { self.nes.reset(); }
-            if ui.button("IRQ").clicked() { self.nes.irq(); }
-            if ui.button("NMI").clicked() { self.nes.nmi(); }
+            {
+                let mut nes = self.nes.write().expect("RW_LOCK_POISONED");
+                if ui.button("RESET").clicked() { nes.reset(); }
+                if ui.button("IRQ").clicked() { nes.irq(); }
+                if ui.button("NMI").clicked() { nes.nmi(); }
+            }
             {
                 let mut m_sound_fn = self.sound_fn.load(std::sync::atomic::Ordering::Relaxed);
                 ui.add(egui::Slider::new(&mut m_sound_fn, 0..=4).text("Sound Fn"));
@@ -665,7 +717,8 @@ impl App {
             }
             ui.separator();
             ui.collapsing("Debug Information", |ui| {
-                Self::upload_nes_nametable_texture(gpu, &self.nes, &self.nametable_texture, &mut self.nametable_texture_buffer);
+                let nes = self.nes.read().expect("RW_LOCK_POISONED");
+                Self::upload_nes_nametable_texture(gpu, &nes, &self.nametable_texture, &mut self.nametable_texture_buffer);
                 let draw_texture = |ui: &mut Ui, texture_id: TextureId, x: f32, y: f32, width: f32, height: f32| {
                     let bounding_box = egui::Rect { min: Pos2 {x, y}, max: Pos2 { x: x + width, y: y + height } };
                     let uv = egui::Rect { min: Pos2 {x: 0.0, y: 0.0}, max: Pos2 {x: 1.0, y: 1.0} };
@@ -686,7 +739,6 @@ impl App {
                 let height = 256.0;
                 draw_texture(ui, self.pattern_table_2_texture_id, x, y, width, height);
             });
-
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("NES (6502) Emulator");
@@ -765,7 +817,10 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {}
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        use cpal::traits::StreamTrait;
+        let _ = self.stream.play();
+    }
 
     fn window_event(
         &mut self,
@@ -786,20 +841,21 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let current_time = std::time::Instant::now();
-                let do_frame = self.run_frame
-                    || (self.clock_cpu
-                        && (current_time - self.last_time)
-                            > std::time::Duration::from_secs_f64(1.00 / 60.0));
-                if do_frame {
-                    self.last_time = current_time;
-                    let ready = false;
-                    self.frame_time_start = std::time::Instant::now();
-                    // for _ in 0..29781 {
-                    while !self.nes.clock(ready) {}
-                    self.frame_time_end = std::time::Instant::now();
-                    self.run_frame = false;
-                }
+                // let current_time = std::time::Instant::now();
+                // let do_frame = self.run_frame
+                //     || (self.clock_cpu
+                //         && (current_time - self.last_time)
+                //             > std::time::Duration::from_secs_f64(1.00 / 60.0));
+                // if do_frame {
+                // let mut nes = self.nes.write().expect("RW_LOCK_POISONED");
+                // self.last_time = current_time;
+                // let ready = false;
+                // self.frame_time_start = std::time::Instant::now();
+                // for _ in 0..29781 {
+                // while !nes.clock(ready) {}
+                // self.frame_time_end = std::time::Instant::now();
+                //     self.run_frame = false;
+                // }
                 match self.draw() {
                     Ok(_) => {}
                     Err(e) => {
@@ -819,51 +875,52 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let pressed = event.state == ElementState::Pressed;
+                let mut nes = self.nes.write().expect("RW_LOCK_POISONED");
                 match event.key_without_modifiers().as_ref() {
                     Key::Character(s) => {
                         match s {
                             "p" if pressed => {
                                 if !self.clock_cpu {
-                                    self.nes.clock(false);
+                                    nes.clock(false);
                                 }
                             }
                             "o" if pressed => {
-                                self.nes.dump_ppu();
+                                nes.dump_ppu();
                             }
                             "f" if pressed => {
                                 self.run_frame = true;
                             }
                             // a
                             "l" => {
-                                self.nes.set_controller_button(0, 7, pressed);
+                                nes.set_controller_button(0, 7, pressed);
                             }
                             // b
                             "k" => {
-                                self.nes.set_controller_button(0, 6, pressed);
+                                nes.set_controller_button(0, 6, pressed);
                             }
                             // start
                             "j" => {
-                                self.nes.set_controller_button(0, 5, pressed);
+                                nes.set_controller_button(0, 5, pressed);
                             }
                             // select
                             "h" => {
-                                self.nes.set_controller_button(0, 4, pressed);
+                                nes.set_controller_button(0, 4, pressed);
                             }
                             // up
                             "w" => {
-                                self.nes.set_controller_button(0, 3, pressed);
+                                nes.set_controller_button(0, 3, pressed);
                             }
                             // down
                             "s" => {
-                                self.nes.set_controller_button(0, 2, pressed);
+                                nes.set_controller_button(0, 2, pressed);
                             }
                             // left
                             "a" => {
-                                self.nes.set_controller_button(0, 1, pressed);
+                                nes.set_controller_button(0, 1, pressed);
                             }
                             // right
                             "d" => {
-                                self.nes.set_controller_button(0, 0, pressed);
+                                nes.set_controller_button(0, 0, pressed);
                             }
                             _ => {}
                         }

@@ -1,8 +1,17 @@
-use nes_rust::{cpu::{Cpu, CpuPinout}, ppu::{Ppu, PpuPinout}};
+use nes_rust::{
+    apu::{Apu, ApuPinout},
+    cpu::{Cpu, CpuPinout},
+    ppu::{Ppu, PpuPinout},
+};
+
+const NES_CLOCK_TIME: u64 = 5_369_318;
 
 pub struct NESBoard {
     cpu: Cpu,
     cpu_pins: CpuPinout,
+
+    apu: Apu,
+    apu_pins: ApuPinout,
 
     ppu: Ppu,
     ppu_pins: PpuPinout,
@@ -14,6 +23,8 @@ pub struct NESBoard {
     chr_rom: Vec<u8>,
     prg_ram: Vec<u8>,
 
+    video_copy: Vec<u8>,
+
     // Raw input of the "controllers"
     controllers: [u8; 2],
     // Shift registers holding a copy of the "controllers"
@@ -23,25 +34,68 @@ pub struct NESBoard {
     dma_write_cycle: bool,
     dma_address: u8,
     dma_address_lo: u8,
+
+    internal_timer: u64,
 }
 
 impl NESBoard {
     // Initialize a new circuit
     // Set the inturrupt lines to false so that way the cpu begins startup correctly by detecting a
     // reset inturrupt
-    pub fn new(cpu: Cpu, internal_ram: Vec<u8>, internal_vram: Vec<u8>, prg_rom: Vec<u8>, chr_rom: Vec<u8>, ram_size: u8) -> NESBoard {
-        let cpu_pins = CpuPinout { irq: false, nmi: false, reset: false, phi: false, ready: false, data_bus: 0, address_bus: 0, address_rw: true, sync: false };
+    pub fn new(
+        cpu: Cpu,
+        internal_ram: Vec<u8>,
+        internal_vram: Vec<u8>,
+        prg_rom: Vec<u8>,
+        chr_rom: Vec<u8>,
+        ram_size: usize,
+    ) -> NESBoard {
+        let cpu_pins = CpuPinout {
+            irq: false,
+            nmi: false,
+            reset: false,
+            phi: false,
+            ready: false,
+            data_bus: 0,
+            address_bus: 0,
+            address_rw: true,
+            sync: false,
+        };
         let mut ppu = Ppu::new();
-        let ppu_pins = PpuPinout { nmi: false, cpu_rw: false, cpu_data: 0, ppu_address_data_low: 0, ppu_address_high: 0, ppu_r: false, ppu_w: false, ppu_sync: false, ppu_ale: false, cpu_control: false, cpu_addr: 0, finished_frame: false, };
-        let prg_ram = vec![0u8; ram_size as usize];
-        let palette_file = include_bytes!("../../src/ntscpalette.pal");
+        let ppu_pins = PpuPinout {
+            nmi: false,
+            cpu_rw: false,
+            cpu_data: 0,
+            ppu_address_data_low: 0,
+            ppu_address_high: 0,
+            ppu_r: false,
+            ppu_w: false,
+            ppu_sync: false,
+            ppu_ale: false,
+            cpu_control: false,
+            cpu_addr: 0,
+            finished_frame: false,
+        };
+        let prg_ram = vec![0u8; ram_size];
+        // let palette_file = include_bytes!("../../src/ntscpalette.pal");
         // let palette_file = include_bytes!("../../src/2C02G_wiki.pal");
-        // let palette_file = include_bytes!("../../src/Composite_wiki.pal");
-        let system_palette: &[u8; 64*3] = palette_file.first_chunk().expect("Palette file did not have 64 RGB entries");
+        let palette_file = include_bytes!("../../src/Composite_wiki.pal");
+        let system_palette: &[u8; 64 * 3] = palette_file
+            .first_chunk()
+            .expect("Palette file did not have 64 RGB entries");
         ppu.set_palette(system_palette);
+        let video_copy = vec![255; nes_rust::ppu::VIDEO_MEMORY_SIZE];
+
+        let apu = Apu::new();
+        let apu_pins = ApuPinout::new();
+
+        let internal_timer = 0;
         NESBoard {
             cpu,
             cpu_pins,
+
+            apu,
+            apu_pins,
 
             ppu,
             ppu_pins,
@@ -52,6 +106,7 @@ impl NESBoard {
             prg_rom,
             chr_rom,
             prg_ram,
+            video_copy,
 
             controllers: [0; 2],
             controllers_copy: [0; 2],
@@ -63,6 +118,7 @@ impl NESBoard {
             dma_address: 0,
             dma_address_lo: 0,
 
+            internal_timer,
         }
     }
 
@@ -80,7 +136,8 @@ impl NESBoard {
                 self.dma_active = self.dma_address_lo > 0;
             } else {
                 // read cycle
-                self.cpu_pins.address_bus = ((self.dma_address as u16) << 8) | (self.dma_address_lo as u16);
+                self.cpu_pins.address_bus =
+                    ((self.dma_address as u16) << 8) | (self.dma_address_lo as u16);
                 self.cpu_mem_read();
             }
             self.dma_write_cycle = !self.dma_write_cycle;
@@ -103,7 +160,7 @@ impl NESBoard {
             0x0000..0x2000 => {
                 let addr = usize::from(addr) % 0x0800;
                 self.cpu_pins.data_bus = self.ram[addr];
-            },
+            }
             0x2000..0x4000 => {
                 // access ppu
                 let addr = usize::from(addr - 0x2000) % 8;
@@ -111,13 +168,13 @@ impl NESBoard {
                 self.ppu_pins.cpu_addr = addr as u8;
                 self.ppu_pins.cpu_control = true;
                 // Data bus will be filled via the ppu_block fn
-            },
+            }
             0x4000..0x4020 => {
                 // apu and IO
                 match addr {
                     0x4014 => {
                         // OAM DMA
-                    },
+                    }
                     0x4016..0x4018 => {
                         let controller = (addr & 0b01) as usize;
                         self.cpu_pins.data_bus = (self.controllers_copy[controller] & 0x80) >> 7;
@@ -125,22 +182,24 @@ impl NESBoard {
                     }
                     _ => {}
                 }
-            },
+            }
             0x4020..0x6000 => {
-                // nothing
-            },
+                // nothing, TODO: Implement wram
+            }
             0x6000..0x8000 => {
                 // prg ram
-                let addr = usize::from(addr - 0x6000) % 0x0800;
-                self.cpu_pins.data_bus = self.prg_ram[addr];
-            },
+                // old modulus: 0x0800 or 2048
+                if self.prg_ram.len() > 0 {
+                    let addr = usize::from(addr - 0x6000) % self.prg_ram.len();
+                    self.cpu_pins.data_bus = self.prg_ram[addr];
+                }
+            }
             0x8000..=0xFFFF => {
                 // prg rom
                 let addr = usize::from(addr - 0x8000) % self.prg_rom.len();
                 self.cpu_pins.data_bus = self.prg_rom[addr];
             }
         }
-
     }
 
     // Assume PHI 2 and write configuration
@@ -150,23 +209,30 @@ impl NESBoard {
             0x0000..0x2000 => {
                 let addr = usize::from(addr) % 0x0800;
                 self.ram[addr] = self.cpu_pins.data_bus;
-            },
+            }
             0x2000..0x4000 => {
                 // access ppu
                 let addr = usize::from(addr - 0x2000) % 8;
                 self.ppu_pins.cpu_rw = self.cpu_pins.address_rw;
                 self.ppu_pins.cpu_addr = addr as u8;
                 self.ppu_pins.cpu_control = true;
-                self.ppu_pins.cpu_data = self.cpu_pins.data_bus; // hand over data from cpu to ppu 
-            },
+                self.ppu_pins.cpu_data = self.cpu_pins.data_bus; // hand over data from cpu to ppu
+            }
             0x4000..0x4020 => {
                 match addr {
+                    0x4000..=0x4013 | 0x4015 | 0x4017 => {
+                        // Apu addresses
+                        let addr = addr - 0x4000;
+                        self.apu_pins.cpu_rw = self.cpu_pins.address_rw;
+                        self.apu_pins.cpu_addr = addr as u8;
+                        self.apu_pins.cpu_data = self.cpu_pins.data_bus;
+                    }
                     0x4014 => {
                         // OAM DMA
                         self.dma_active = true;
                         self.dma_address = self.cpu_pins.data_bus;
                         self.dma_address_lo = 0;
-                    },
+                    }
                     0x4016..0x4018 => {
                         let controller = (addr & 0b01) as usize;
                         self.controllers_copy[controller] = self.controllers[controller];
@@ -174,20 +240,22 @@ impl NESBoard {
                     _ => {}
                 }
                 // apu and IO
-            },
+            }
             0x4020..0x6000 => {
                 // nothing
-            },
+            }
             0x6000..0x8000 => {
-                // prg ram, if available (Will panic if accessed and no ram)
-                let addr = usize::from(addr - 0x6000) % 0x0800;
-                self.prg_ram[addr] = self.cpu_pins.data_bus;
-            },
+                // prg ram, if available
+                // old modulus: 0x0800 or 2048
+                if self.prg_ram.len() > 0 {
+                    let addr = usize::from(addr - 0x6000) % self.prg_ram.len();
+                    self.prg_ram[addr] = self.cpu_pins.data_bus;
+                }
+            }
             0x8000..=0xFFFF => {
                 // prg rom, no writes
             }
         }
-
     }
 
     fn ppu_clock(&mut self) -> bool {
@@ -196,16 +264,21 @@ impl NESBoard {
         if self.ppu_pins.ppu_ale {
             self.ppu_address_latch = self.ppu_pins.ppu_address_data_low;
         }
-        let addr = ((self.ppu_pins.ppu_address_high as usize) << 8) | self.ppu_address_latch as usize;
+        let addr =
+            ((self.ppu_pins.ppu_address_high as usize) << 8) | self.ppu_address_latch as usize;
         if self.ppu_pins.ppu_r || self.ppu_pins.ppu_w {
             match addr {
                 0x0000..0x2000 => {
                     if self.ppu_pins.ppu_r {
                         self.ppu_pins.ppu_address_data_low = self.chr_rom[addr];
                     } else {
-                        panic!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
+                        dbg!(
+                            "\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!",
+                            addr,
+                            addr
+                        );
                     }
-                },
+                }
                 0x2000.. => {
                     // internal NES vram or mapped by cartidge
                     // For nametables
@@ -218,14 +291,13 @@ impl NESBoard {
                     } else {
                         self.vram[addr] = self.ppu_pins.ppu_address_data_low;
                     }
-                },
+                }
                 // 0x3000.. => {
                 //     println!("\t!!!Writing to an RO portion of vram: 0x{:0>4X}({})!!!", addr, addr);
-                    // 0x3000..0x3EFF => unused mirron of vram
-                    // 0x3F00.. is the start of palette ram, but it's internal to the PPU and doesn't
-                    // reach here
+                // 0x3000..0x3EFF => unused mirron of vram
+                // 0x3F00.. is the start of palette ram, but it's internal to the PPU and doesn't
+                // reach here
                 // }
-                
             }
         }
 
@@ -240,8 +312,19 @@ impl NESBoard {
         self.ppu_pins.finished_frame
     }
 
+    fn apu_clock(&mut self) -> f64 {
+        self.apu.clock(&mut self.apu_pins)
+    }
+
     // Emulate one master clock cycle
-    pub fn clock(&mut self, _ready: bool) -> bool {
+    pub fn clock(&mut self, _ready: bool) -> Option<f64> {
+        // 1 / (component hz) / min(all 1 / component hz) * 1000
+        // 1.0
+        const PPU_CLOCK_FREQ: u64 = 1000;
+        // 2.999999999...
+        const CPU_CLOCK_FREQ: u64 = 3000;
+        // 121.7532653
+        const APU_SAMPLE_FREQ: u64 = 121753;
 
         let ff_1 = self.ppu_clock();
         let ff_2 = self.ppu_clock();
@@ -252,12 +335,30 @@ impl NESBoard {
         let ff_3 = self.ppu_clock();
 
         self.cpu_clock(true);
+        let maybe_sample = self.apu_clock();
+
+        self.internal_timer += CPU_CLOCK_FREQ;
 
         // Reset inturrupt requests
         self.cpu_pins.reset = true;
         self.cpu_pins.irq = true;
         self.cpu_pins.nmi = true; // might be unnecessary as ppu manages nmi
-        ff_1 || ff_2 || ff_3
+
+        // TODO: Generate audio sample in real-time
+        // Accumulate a time variable per nes-clock
+        // When accumulated time > RealtimePerSample,
+        //  Emit sample
+        let mut audio_sample = None;
+        if APU_SAMPLE_FREQ <= self.internal_timer {
+            self.internal_timer -= APU_SAMPLE_FREQ;
+            audio_sample = Some(maybe_sample);
+        }
+
+        let video_finished = ff_1 || ff_2 || ff_3;
+        if video_finished {
+            self.video_copy.copy_from_slice(self.ppu.video_data());
+        }
+        audio_sample
     }
 
     pub fn dump_ppu(&self) {
@@ -273,7 +374,7 @@ impl NESBoard {
     }
 
     pub fn video_memory(&self) -> &[u8] {
-        self.ppu.video_data()
+        &self.video_copy
     }
 
     pub fn pattern_table_memory(&self) -> &[u8] {
