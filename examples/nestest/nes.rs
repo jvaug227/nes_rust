@@ -202,6 +202,7 @@ impl NESBoard {
     fn print_log(&mut self) {
         let pc = self.cpu.pc;
         let opcode    = self.ram[pc as usize    ];
+        // println!("Opcode {} - {} @ {:0>#X}", opcode, opcode_to_str(opcode), pc);
         let byte1: u8 = self.ram[pc as usize + 1];
         let byte2: u8 = self.ram[pc as usize + 2];
         let a = self.cpu.a;
@@ -221,8 +222,9 @@ impl NESBoard {
 
         let log = self.get_log();
 
-        assert_eq!(log.opcode, opcode);
-        assert_eq!(log.pc, pc);
+
+        assert_eq!(log.pc, pc, "Opcode {} was supposed to be executed at {:0>#X}. instead occured at {:0>#X}", opcode_to_str(opcode), log.pc, pc);
+        assert_eq!(log.opcode, opcode, "Opcode {} ({}) was supposed to be {} ({})", opcode_to_str(opcode), opcode, log.opcode, opcode_to_str(log.opcode));
         assert_eq!(log.a, a);
         assert_eq!(log.x, x);
         assert_eq!(log.y, y);

@@ -614,6 +614,14 @@ impl Cpu {
             (Addr::ZPY, PipelineStatus::Addr3, true) => true, // shouldn't be reached but nonetheless
 
             (Addr::ABS, PipelineStatus::Addr1, false) => {
+                if opcode == InsOp::JSR {
+                    println!("JSR A-A PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                    // self.pc += 1;
+                    // JSR does NOT go to the second operand
+                    // immediately, instead it jumps into reading
+                    // and writing the stack first
+                    return true;
+                }
                 *address_bus = self.pc;
                 *address_rw = true;
                 self.pc += 1;
@@ -1169,30 +1177,58 @@ impl Cpu {
             // I read the new pc, push the old pc,
             // then set pc to the new pc
             (InsOp::JSR, PS::Exec0, false) => {
-                self.pc -= 1;
                 *address_bus = 0x0100 + self.stkpt as u16;
-                *address_rw = false;
-                self.fetched = hi_byte(self.pc);
-                self.stkpt = self.stkpt.wrapping_sub(1);
+                *address_rw = true;
+                println!("JSR 0-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec0, true) => {
-                *data_bus = self.fetched;
+                println!("JSR 0-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                // Open-bus?
+                // self.fetched = *data_bus;
                 false
             }
             (InsOp::JSR, PS::Exec1, false) => {
                 *address_bus = 0x0100 + self.stkpt as u16;
                 *address_rw = false;
-                self.fetched = lo_byte(self.pc);
                 self.stkpt = self.stkpt.wrapping_sub(1);
-                self.pc = self.addr_data;
+                // self.fetched = hi_byte(self.pc);
+                println!("JSR 1-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec1, true) => {
-                *data_bus = self.fetched;
+                *data_bus = hi_byte(self.pc);
+                println!("JSR 1-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
-            (InsOp::JSR, PS::Exec2, _) => true,
+            (InsOp::JSR, PS::Exec2, false) => {
+                *address_bus = 0x0100 + self.stkpt as u16;
+                *address_rw = false;
+                self.stkpt = self.stkpt.wrapping_sub(1);
+                // self.fetched = lo_byte(self.pc);
+                // self.pc = self.addr_data;
+                println!("JSR 2-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                false
+            }
+            (InsOp::JSR, PS::Exec2, true) => {
+                *data_bus = lo_byte(self.pc);
+                println!("JSR 2-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                false
+            }
+            (InsOp::JSR, PS::Exec3, false) => {
+                *address_bus = self.pc;
+                *address_rw = true;
+                println!("JSR 3-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                false
+            }
+            (InsOp::JSR, PS::Exec3, true) => {
+                set_lo_byte(&mut self.addr_data, self.fetched);
+                set_hi_byte(&mut self.addr_data, *data_bus);
+                self.pc = self.addr_data;
+                println!("JSR 3-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
+                true
+            }
+            (InsOp::JSR, PS::Exec4, _) => true,
 
             // Load Accumulator
             (InsOp::LDA, PS::Exec0, false) => {
