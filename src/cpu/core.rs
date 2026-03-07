@@ -614,12 +614,10 @@ impl Cpu {
             (Addr::ZPY, PipelineStatus::Addr3, true) => true, // shouldn't be reached but nonetheless
 
             (Addr::ABS, PipelineStatus::Addr1, false) => {
+                // JSR does NOT go to the second operand
+                // immediately, instead it jumps into reading
+                // and writing the stack first
                 if opcode == InsOp::JSR {
-                    println!("JSR A-A PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
-                    // self.pc += 1;
-                    // JSR does NOT go to the second operand
-                    // immediately, instead it jumps into reading
-                    // and writing the stack first
                     return true;
                 }
                 *address_bus = self.pc;
@@ -738,7 +736,7 @@ impl Cpu {
             }
 
             (Addr::IDX, PipelineStatus::Addr1, false) => {
-                self.fetched = lo_byte(self.addr_data).wrapping_add(self.x); // TODO: this might be set after writing to addr
+                self.fetched = lo_byte(self.addr_data).wrapping_add(self.x);
                 *address_bus = self.fetched as u16;
                 *address_rw = true;
                 false
@@ -773,13 +771,13 @@ impl Cpu {
             }
             (Addr::IDX, PipelineStatus::Addr4, true) => {
                 self.fetched = *data_bus;
-                false
+                true //TODO: Why was this false?
             }
 
             (Addr::IDY, PipelineStatus::Addr1, false) => {
                 *address_bus = self.addr_data;
                 *address_rw = true;
-                self.addr_data = self.addr_data.wrapping_add(1); // TODO: Check if this needs to wrap on ZP
+                self.addr_data = self.addr_data.wrapping_add(1); // TODO: Check if this needs to wrap on ZP (u8 vs u16)
                 false
             }
             (Addr::IDY, PipelineStatus::Addr1, true) => {
@@ -1179,12 +1177,9 @@ impl Cpu {
             (InsOp::JSR, PS::Exec0, false) => {
                 *address_bus = 0x0100 + self.stkpt as u16;
                 *address_rw = true;
-                println!("JSR 0-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec0, true) => {
-                println!("JSR 0-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
-                // Open-bus?
                 // self.fetched = *data_bus;
                 false
             }
@@ -1192,40 +1187,31 @@ impl Cpu {
                 *address_bus = 0x0100 + self.stkpt as u16;
                 *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
-                // self.fetched = hi_byte(self.pc);
-                println!("JSR 1-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec1, true) => {
                 *data_bus = hi_byte(self.pc);
-                println!("JSR 1-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec2, false) => {
                 *address_bus = 0x0100 + self.stkpt as u16;
                 *address_rw = false;
                 self.stkpt = self.stkpt.wrapping_sub(1);
-                // self.fetched = lo_byte(self.pc);
-                // self.pc = self.addr_data;
-                println!("JSR 2-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec2, true) => {
                 *data_bus = lo_byte(self.pc);
-                println!("JSR 2-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec3, false) => {
                 *address_bus = self.pc;
                 *address_rw = true;
-                println!("JSR 3-0 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 false
             }
             (InsOp::JSR, PS::Exec3, true) => {
                 set_lo_byte(&mut self.addr_data, self.fetched);
                 set_hi_byte(&mut self.addr_data, *data_bus);
                 self.pc = self.addr_data;
-                println!("JSR 3-1 PC:{:#4x} ADDR:{:#4x} STK:{:#4x} DATA:{:#2x} B:{:#2x}", self.pc, *address_bus, 0x0100 + self.stkpt as u16, *data_bus, self.fetched);
                 true
             }
             (InsOp::JSR, PS::Exec4, _) => true,
@@ -1517,7 +1503,7 @@ impl Cpu {
             }
             (InsOp::STA, PS::Exec0, true) => {
                 *data_bus = self.fetched;
-                true
+                false
             }
             (InsOp::STA, PS::Exec1, _) => true,
             // Store X register

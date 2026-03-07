@@ -22,10 +22,18 @@ enum VRamManip {
 
 struct LoopyShiftRegister(u16);
 impl LoopyShiftRegister {
-    fn new() -> Self { Self(0) }
-    fn set(&mut self, data: u8) { self.0 = (self.0 & 0xFF00) | (data as u16); }
-    fn shift(&mut self) { self.0 <<= 1; }
-    fn get(&self, offset: u8) -> bool { (self.0 & (0x8000 >> u16::from(offset))) > 0 }
+    fn new() -> Self {
+        Self(0)
+    }
+    fn set(&mut self, data: u8) {
+        self.0 = (self.0 & 0xFF00) | (data as u16);
+    }
+    fn shift(&mut self) {
+        self.0 <<= 1;
+    }
+    fn get(&self, offset: u8) -> bool {
+        (self.0 & (0x8000 >> u16::from(offset))) > 0
+    }
 }
 
 struct PixelBuffer {
@@ -33,20 +41,20 @@ struct PixelBuffer {
 }
 impl PixelBuffer {
     fn new() -> Self {
-        Self {
-            data: [0; 256],
-        }
+        Self { data: [0; 256] }
     }
     fn set(&mut self, x: u8, lsb: u8, msb: u8, priority: u8, palette: u8, sprite_0: bool) {
         let max_iter = 8.min(255 - x);
         let sprite_data = (palette << 2) | (priority << 7) | (u8::from(sprite_0) << 6);
         for i in 0..max_iter {
             let index = x.wrapping_add(i) as usize;
-            let lsb = (lsb >> (7-i)) & 1;
-            let msb = (msb >> (7-i)) & 1;
+            let lsb = (lsb >> (7 - i)) & 1;
+            let msb = (msb >> (7 - i)) & 1;
             let pixel_data = lsb | (msb << 1);
             let existing_data_transparent = self.data[index] & 3 == 0;
-            if !existing_data_transparent { continue; }
+            if !existing_data_transparent {
+                continue;
+            }
             self.data[index] = pixel_data | sprite_data;
         }
     }
@@ -112,7 +120,6 @@ pub struct Ppu {
     attribute_msb_scroll: LoopyShiftRegister,
     attribute_lsb_scroll: LoopyShiftRegister,
 
-
     scanline: usize,
     cycle: usize,
     is_odd_frame: bool,
@@ -131,7 +138,6 @@ pub struct Ppu {
     video_data: Vec<u8>,
 }
 
-
 impl Ppu {
     pub fn dump(&self) {
         println!("\n=====PPU DUMP=====");
@@ -147,8 +153,13 @@ impl Ppu {
         // println!("Next Attribute: {:0>2X}", self.next_attribute);
         for i in 0..64 {
             let i2 = i * 4;
-            println!("OAM {i:0>2}: {3:0>3},{0:0>3} {1:0>2X}:{2:0>8b}", self.oam_memory[i2], self.oam_memory[i2+1], self.oam_memory[i2+2], self.oam_memory[i2+3]);
-
+            println!(
+                "OAM {i:0>2}: {3:0>3},{0:0>3} {1:0>2X}:{2:0>8b}",
+                self.oam_memory[i2],
+                self.oam_memory[i2 + 1],
+                self.oam_memory[i2 + 2],
+                self.oam_memory[i2 + 3]
+            );
         }
     }
 
@@ -156,7 +167,7 @@ impl Ppu {
         Self {
             control_register: 0,
             mask_register: 0,
-            status_register: 0, 
+            status_register: 0,
             oam_address_register: 0,
             temp_address: 0,
             w_register: false,
@@ -192,11 +203,11 @@ impl Ppu {
             frame_palette_memory: [0; 32],
             system_palette_memory: [0; 64 * 3],
 
-            video_data: vec![255; VIDEO_MEMORY_SIZE]
+            video_data: vec![255; VIDEO_MEMORY_SIZE],
         }
     }
 
-    pub fn set_palette(&mut self, data: &[u8; 64*3]) {
+    pub fn set_palette(&mut self, data: &[u8; 64 * 3]) {
         self.system_palette_memory.clone_from_slice(data);
     }
 
@@ -205,7 +216,6 @@ impl Ppu {
     }
 
     pub fn clock(&mut self, pins: &mut PpuPinout) {
-
         // Grab read byte before we manipulate the state of the ppu at all
         if self.vram_manip == VRamManip::Read && pins.ppu_r {
             self.internal_read_buffer = pins.ppu_address_data_low;
@@ -244,10 +254,9 @@ impl Ppu {
                     pins.ppu_address_data_low = self.vram_data;
                     pins.ppu_w = true;
                 }
-                _ => { }
+                _ => {}
             }
         }
-
     }
 
     fn shift(&mut self) {
@@ -257,7 +266,7 @@ impl Ppu {
             self.attribute_msb_scroll.shift();
             self.attribute_lsb_scroll.shift();
         }
-    } 
+    }
 
     fn render(&mut self, pins: &mut PpuPinout) {
         if self.is_render_fetch_cycle() && self.is_rendering_enabled() {
@@ -314,7 +323,7 @@ impl Ppu {
                 self.increment_y();
             }
 
-            // "Transfer X" + 
+            // "Transfer X" +
             if self.cycle == 257 && (self.scanline < 240 || self.scanline == 261) {
                 const X_MASK: u16 = 0b1111101111100000;
                 self.vram_address = (self.vram_address & X_MASK) | (self.temp_address & !X_MASK);
@@ -327,12 +336,16 @@ impl Ppu {
             }
 
             if self.is_render_cycle() {
-                let (sprite_palette_index, sprite_priority, sprite_opaque, sprite_0) = if self.enabled_sprite_rendering() {
+                let (sprite_palette_index, sprite_priority, sprite_opaque, sprite_0) = if self
+                    .enabled_sprite_rendering()
+                {
                     let (pixel, priority, sprite_0) = self.oam_pixel_buffer.get(self.cycle as u8);
                     (pixel as usize, priority as usize, (pixel & 3) > 0, sprite_0)
-                } else { (0, 0, false, false) };
-                
-                let (bg_palette_index, bg_opaque) =  if self.enabled_background_rendering() {
+                } else {
+                    (0, 0, false, false)
+                };
+
+                let (bg_palette_index, bg_opaque) = if self.enabled_background_rendering() {
                     let offset = self.get_fine_x();
                     let tile_msb = self.tile_msb_scroll.get(offset) as u8;
                     let tile_lsb = self.tile_lsb_scroll.get(offset) as u8;
@@ -343,35 +356,50 @@ impl Ppu {
                     // 2-bit value selecting index inside the palette
                     let pixel_value = usize::from((tile_msb << 1) | tile_lsb);
                     // 2-bit value selecting which palette
-                    let attribute_value = usize::from((attribute_msb<<1) | attribute_lsb);
+                    let attribute_value = usize::from((attribute_msb << 1) | attribute_lsb);
                     (pixel_value | (attribute_value << 2), pixel_value > 0)
-                } else { (0, false) };
+                } else {
+                    (0, false)
+                };
 
-                if self.enabled_background_rendering() && self.enabled_sprite_rendering() && sprite_0 && sprite_opaque && bg_opaque && !self.get_sprite_hit() {
+                if self.enabled_background_rendering()
+                    && self.enabled_sprite_rendering()
+                    && sprite_0
+                    && sprite_opaque
+                    && bg_opaque
+                    && !self.get_sprite_hit()
+                {
                     self.set_sprite_hit();
                 }
-                
-                let calculate_winning_pixel = |bg_opaque: usize, sprite_opaque: usize, priority: usize| -> usize {
-                    let idx = bg_opaque | (sprite_opaque << 1);
-                    let is_flippable = bg_opaque & sprite_opaque;
-                    // When both bits are 1's, we flip one of them off based on priority
-                    // Priority 0: we flip the bottom bit off
-                    // Priority 1: we flip the top bit off
-                    idx ^ (is_flippable << priority)
-                };
+
+                let calculate_winning_pixel =
+                    |bg_opaque: usize, sprite_opaque: usize, priority: usize| -> usize {
+                        let idx = bg_opaque | (sprite_opaque << 1);
+                        let is_flippable = bg_opaque & sprite_opaque;
+                        // When both bits are 1's, we flip one of them off based on priority
+                        // Priority 0: we flip the bottom bit off
+                        // Priority 1: we flip the top bit off
+                        idx ^ (is_flippable << priority)
+                    };
 
                 let pixels = [0, bg_palette_index, sprite_palette_index];
                 // 1-bit value selecting which half (bg/sprite) of frame palette ram to access
-                let winning_pixel = calculate_winning_pixel(bg_opaque as usize, sprite_opaque as usize, sprite_priority);
+                let winning_pixel = calculate_winning_pixel(
+                    bg_opaque as usize,
+                    sprite_opaque as usize,
+                    sprite_priority,
+                );
                 let winning_page = (winning_pixel / 2) << 4;
-                
-                let system_palette_index = self.get_frame_palette(winning_page | pixels[winning_pixel]) as usize;
+
+                let system_palette_index =
+                    self.get_frame_palette(winning_page | pixels[winning_pixel]) as usize;
                 // Copy range of rgb from system palette to video data; the alpha should always be
                 // 255 as the initial values in video memory are 255 and alpha is never touched
                 // again.
                 let tint = system_palette_index * 3;
                 let point = (self.scanline * 256 + self.cycle) * 4;
-                self.video_data[point..(point+3)].copy_from_slice(&self.system_palette_memory[tint..(tint+3)]);
+                self.video_data[point..(point + 3)]
+                    .copy_from_slice(&self.system_palette_memory[tint..(tint + 3)]);
             }
         }
 
@@ -392,11 +420,12 @@ impl Ppu {
         }
 
         self.cycle = self.cycle.wrapping_add(1) % DOTS_PER_SCANLINE;
-        if self.cycle == 0 { self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME; }
+        if self.cycle == 0 {
+            self.scanline = self.scanline.wrapping_add(1) % SCANLINES_PER_FRAME;
+        }
     }
 
     fn render_fetch(&mut self) -> Option<u16> {
-
         let v = self.vram_address;
         let v_cycle = self.cycle - 1;
         let cycle_fetch_period = v_cycle % 8;
@@ -408,9 +437,10 @@ impl Ppu {
                 self.tile_msb_scroll.set(self.next_tile_msb);
                 self.tile_lsb_scroll.set(self.next_tile_lsb);
                 // Extend the bit to a full set of 1's or 0's across the scroll register
-                self.attribute_msb_scroll.set(0xFF * ((self.next_attribute >> 1) & 1));
-                self.attribute_lsb_scroll.set(0xFF * (self.next_attribute & 1));
-
+                self.attribute_msb_scroll
+                    .set(0xFF * ((self.next_attribute >> 1) & 1));
+                self.attribute_lsb_scroll
+                    .set(0xFF * (self.next_attribute & 1));
 
                 let nametable_address = 0x2000 | (v & 0x0FFF);
                 Some(nametable_address)
@@ -418,7 +448,8 @@ impl Ppu {
             2 => {
                 self.next_nametable = self.internal_read_buffer;
 
-                let attribute_address = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
+                let attribute_address =
+                    0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
                 Some(attribute_address)
             }
             4 => {
@@ -437,18 +468,21 @@ impl Ppu {
                 let masked_address = self.vram_address & 0x42;
                 let x = ((masked_address >> 1) & 1) * 2;
                 let y = ((masked_address >> 6) & 1) * 4;
-                self.next_attribute >>= x|y;
+                self.next_attribute >>= x | y;
                 self.next_attribute &= 0x03;
 
                 let tile_lsb_address = ((self.background_pattern_table() as u16) << 12)
-                    + (u16::from(self.next_nametable) << 4) + ((self.vram_address >> 12) & 0b111);
+                    + (u16::from(self.next_nametable) << 4)
+                    + ((self.vram_address >> 12) & 0b111);
                 Some(tile_lsb_address)
             }
             6 => {
                 self.next_tile_lsb = self.internal_read_buffer;
 
                 let tile_msb_address = ((self.background_pattern_table() as u16) << 12)
-                    + (u16::from(self.next_nametable) << 4) + ((self.vram_address >> 12) & 0b111) + 8;
+                    + (u16::from(self.next_nametable) << 4)
+                    + ((self.vram_address >> 12) & 0b111)
+                    + 8;
                 Some(tile_msb_address)
             }
             7 => {
@@ -456,9 +490,8 @@ impl Ppu {
                 // Increment hoizontal
                 None
             }
-            _ => None // second cycles of fetches that don't do anything
+            _ => None, // second cycles of fetches that don't do anything
         }
-
     }
 
     /// TODO: Determine if sprite 7 will get it's cycle 0
@@ -469,14 +502,25 @@ impl Ppu {
         if let Some(sprite) = &mut self.secondary_oam_buffer[sprite_index] {
             let addr = sprite.tile;
             let flip_horizontally = (sprite.attrib & 0x40) > 0;
-            let data = if flip_horizontally { self.internal_read_buffer.reverse_bits() } else { self.internal_read_buffer } as u16;
+            let data = if flip_horizontally {
+                self.internal_read_buffer.reverse_bits()
+            } else {
+                self.internal_read_buffer
+            } as u16;
             match c {
                 0 => {
                     // fetch msb byte? determine if a fetch should occur since cycle 0 will not
                     // have a read value before this. First msb fetch not until cycle 7
                     // INFO: This may have been solved by skipping the first dummy cycle that would
                     // have read the msb
-                    self.oam_pixel_buffer.set(sprite.x, sprite.tile as u8, data as u8, ((sprite.attrib & 0x20) > 0) as u8, sprite.attrib & 3, (sprite.attrib & 4) > 0);
+                    self.oam_pixel_buffer.set(
+                        sprite.x,
+                        sprite.tile as u8,
+                        data as u8,
+                        ((sprite.attrib & 0x20) > 0) as u8,
+                        sprite.attrib & 3,
+                        (sprite.attrib & 4) > 0,
+                    );
                     // sprite.tile = (sprite.tile & 0x00FF) | (data << 8);
                     None
                 }
@@ -490,12 +534,11 @@ impl Ppu {
                     // Calculate msb address
                     Some(addr | 0x08)
                 }
-                _ => { None }
+                _ => None,
             }
         } else {
             None
         }
-        
     }
 
     /// Each sprite is evaluated over a series of 3 cycles. During 2 of the cycles, the return will
@@ -510,7 +553,7 @@ impl Ppu {
         let s = (self.scanline) as u8;
 
         // Evaluate only on the last cycle of each sprite,
-        // no need to perfectly emulate the evaluation in over multiple 
+        // no need to perfectly emulate the evaluation in over multiple
         // cycles as there is no outside bus interaction
         // TODO: Check if oam[(sprite + offset) % 256] is necessary, and/or how to fix wrapping
         // around the edge
@@ -525,7 +568,7 @@ impl Ppu {
             //  8x16 tile - 1 bit table + 7-bit (ignores the pattern bit in control register, uses
             //  the bit in the byte). This works because the tiles are consecutive and byte 255 can
             //  only be used in this case if the tile address is 254.
-            let tile = self.oam_memory[(sprite+1) % 256];
+            let tile = self.oam_memory[(sprite + 1) % 256];
             // byte 2 - attributes
             //  2-bit palette
             //  3-bit unused
@@ -533,11 +576,15 @@ impl Ppu {
             //  1-bit flip horizontally
             //  1-bit flip vertically
             // Insert sprite-0 into unused field at bit 2
-            let attrib = self.oam_memory[(sprite+2) % 256] | sprite_0_flag;
+            let attrib = self.oam_memory[(sprite + 2) % 256] | sprite_0_flag;
             // byte 3 - left x position
-            let x = self.oam_memory[(sprite+3) % 256];
+            let x = self.oam_memory[(sprite + 3) % 256];
 
-            let (table, tile, sprite_height) = if self.sprite_size() { (tile & 1, tile >> 1, 16) } else { (self.sprite_pattern_table(), tile, 8) };
+            let (table, tile, sprite_height) = if self.sprite_size() {
+                (tile & 1, tile >> 1, 16)
+            } else {
+                (self.sprite_pattern_table(), tile, 8)
+            };
 
             let flip_vertically = (attrib & 0x80) > 0;
             let y_s = s.wrapping_sub(y);
@@ -548,11 +595,7 @@ impl Ppu {
                 let y_t = if flip_vertically { 7 - y_s } else { y_s } as u16;
                 let tile = ((table as u16) << 12) | ((tile as u16) << 4) | y_t;
                 // Sprite can be drawn
-                return Some(Some(EvaluatedSprite {
-                    x,
-                    attrib,
-                    tile,
-                }));
+                return Some(Some(EvaluatedSprite { x, attrib, tile }));
             } else {
                 // Sprite was skipped
                 return Some(None);
@@ -565,21 +608,34 @@ impl Ppu {
     fn handle_cpu_io(&mut self, pins: &mut PpuPinout) {
         match pins.cpu_addr {
             0 => {
-                // going to assume write is intended.. for now
-                self.control_register = pins.cpu_data;
-                self.temp_address = (self.temp_address & 0b1111001111111111) | ((self.base_nametable_address() as u16) << 10);
+                if pins.cpu_rw {
+                    // pins.cpu_data = self.internal_read_buffer;
+                } else {
+                    // going to assume write is intended.. for now
+                    self.control_register = pins.cpu_data;
+                    self.temp_address = (self.temp_address & 0b1111001111111111)
+                        | ((self.base_nametable_address() as u16) << 10);
+                }
             }
             1 => {
-                // going to assume write is intended.. for now
-                self.mask_register = pins.cpu_data;
+                if pins.cpu_rw {
+                    // pins.cpu_data = self.internal_read_buffer;
+                } else {
+                    // going to assume write is intended.. for now
+                    self.mask_register = pins.cpu_data;
+                }
             }
             2 => {
-                pins.cpu_data = self.status_register;
+                pins.cpu_data = (pins.cpu_data & 0b00011111) | (self.status_register & 0b11100000);
                 self.set_vblank_flag(false);
                 self.w_register = false;
             }
             3 => {
-                self.oam_address_register = pins.cpu_data;
+                if pins.cpu_rw {
+                    // pins.cpu_data = self.internal_read_buffer;
+                } else {
+                    self.oam_address_register = pins.cpu_data;
+                }
             }
             4 => {
                 if pins.cpu_rw {
@@ -590,25 +646,34 @@ impl Ppu {
                 }
             }
             5 => {
-                if !self.w_register {
-                    self.set_fine_x(pins.cpu_data & 0x07);
-                    self.set_course_x(pins.cpu_data >> 3);
+                if pins.cpu_rw {
+                    // pins.cpu_data = self.internal_read_buffer;
                 } else {
-                    self.set_fine_y(pins.cpu_data & 0x07);
-                    self.set_course_y(pins.cpu_data >> 3);
+                    if !self.w_register {
+                        self.set_fine_x(pins.cpu_data & 0x07);
+                        self.set_course_x(pins.cpu_data >> 3);
+                    } else {
+                        self.set_fine_y(pins.cpu_data & 0x07);
+                        self.set_course_y(pins.cpu_data >> 3);
+                    }
+                    self.w_register = !self.w_register;
                 }
-                self.w_register = !self.w_register;
             }
             6 => {
-                if !self.w_register {
-                    self.temp_address = ((pins.cpu_data & 0x3F) as u16) << 8;
+                if pins.cpu_rw {
+                    // pins.cpu_data = self.internal_read_buffer;
                 } else {
-                    self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
-                    self.vram_address = self.temp_address;
+                    if !self.w_register {
+                        self.temp_address = ((pins.cpu_data & 0x3F) as u16) << 8;
+                    } else {
+                        self.temp_address = (self.temp_address & 0xFF00) | (pins.cpu_data as u16);
+                        self.vram_address = self.temp_address;
+                    }
+                    self.w_register = !self.w_register;
                 }
-                self.w_register = !self.w_register;
             }
-            _ => { // assume 7
+            _ => {
+                // assume 7
                 if pins.cpu_rw {
                     pins.cpu_data = if (0x3F00..=0x3FFF).contains(&self.vram_address) {
                         let palette_address = (self.vram_address - 0x3F00) % 0x20;
@@ -627,12 +692,15 @@ impl Ppu {
                         self.vram_data = pins.cpu_data;
                         self.vram_manip = VRamManip::Write;
                     };
-
+                    // Attempt to emulate open-bus
+                    pins.cpu_data = self.internal_read_buffer;
                 }
                 pins.ppu_address_high = (self.vram_address >> 8) as u8;
                 pins.ppu_address_data_low = self.vram_address as u8;
                 pins.ppu_ale = true;
-                self.vram_address = self.vram_address.wrapping_add(self.vram_address_increment() as u16);
+                self.vram_address = self
+                    .vram_address
+                    .wrapping_add(self.vram_address_increment() as u16);
             }
         }
     }
@@ -648,23 +716,21 @@ impl Ppu {
     }
 
     fn increment_y(&mut self) {
-        if (self.vram_address & 0x7000) != 0x7000 {                         // if fine Y < 7
-            self.vram_address += 0x1000;                                    // increment fine Y
-        }
-        else {
-            self.vram_address &= !0x7000;                                   // fine Y = 0
-            let mut y = (self.vram_address & 0x03E0) >> 5;                  // let y = coarse Y
+        if (self.vram_address & 0x7000) != 0x7000 {
+            // if fine Y < 7
+            self.vram_address += 0x1000; // increment fine Y
+        } else {
+            self.vram_address &= !0x7000; // fine Y = 0
+            let mut y = (self.vram_address & 0x03E0) >> 5; // let y = coarse Y
             if y == 29 {
-                y = 0;                                                      // coarse Y = 0
-                self.vram_address ^= 0x0800;                                // switch vertical nametable
+                y = 0; // coarse Y = 0
+                self.vram_address ^= 0x0800; // switch vertical nametable
+            } else if y == 31 {
+                y = 0; // coarse Y = 0, nametable not switched
+            } else {
+                y += 1; // increment coarse Y
             }
-            else if y == 31 {
-                y = 0;                                                      // coarse Y = 0, nametable not switched
-            }
-            else {
-                y += 1;                                                     // increment coarse Y
-            }
-            self.vram_address = (self.vram_address & (!0x03E0)) | (y << 5);   // put coarse Y back into v
+            self.vram_address = (self.vram_address & (!0x03E0)) | (y << 5); // put coarse Y back into v
         }
     }
 
@@ -674,7 +740,8 @@ impl Ppu {
 
     // -- Rendering timing functions --
     fn is_render_fetch_cycle(&self) -> bool {
-        ((1..257).contains(&self.cycle) || (321..337).contains(&self.cycle)) && self.is_fetch_scanline()
+        ((1..257).contains(&self.cycle) || (321..337).contains(&self.cycle))
+            && self.is_fetch_scanline()
     }
 
     fn is_render_cycle(&self) -> bool {
@@ -716,11 +783,13 @@ impl Ppu {
     }
     fn set_course_y(&mut self, b: u8) {
         const COURSE_Y_MASK: u16 = 0b0000001111100000;
-        self.temp_address = (self.temp_address & !COURSE_Y_MASK) | ((u16::from(b) & COURSE_Y_MASK) << 5);
+        self.temp_address =
+            (self.temp_address & !COURSE_Y_MASK) | ((u16::from(b) & COURSE_Y_MASK) << 5);
     }
     fn set_fine_y(&mut self, b: u8) {
         const FINE_Y_MASK: u16 = 0b0111000000000000;
-        self.temp_address = (self.temp_address & !FINE_Y_MASK) | ((u16::from(b) & FINE_Y_MASK) << 12);
+        self.temp_address =
+            (self.temp_address & !FINE_Y_MASK) | ((u16::from(b) & FINE_Y_MASK) << 12);
     }
 
     // -- Register accessors & mutators --
@@ -728,7 +797,11 @@ impl Ppu {
         self.control_register & 0b00000011
     }
     fn vram_address_increment(&self) -> u8 {
-        if (self.control_register & 0b00000100) > 0 { 32 } else { 1 }
+        if (self.control_register & 0b00000100) > 0 {
+            32
+        } else {
+            1
+        }
     }
     fn sprite_pattern_table(&self) -> u8 {
         (self.control_register & 0b00001000) >> 3

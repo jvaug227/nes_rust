@@ -1,3 +1,5 @@
+use crate::cpu::instructions::lookup::LOOKUP_TABLE;
+
 use super::InstructionOperations;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -407,6 +409,14 @@ pub mod Instructions {
     pub const TYA_IMP: u8   = 0x98;     // 2
 }
 
+/// "opcode" as in the full instruction byte
+pub fn real_opcode_to_str(opcode: u8) -> &'static str {
+    let ins = LOOKUP_TABLE[opcode as usize].op();
+    opcode_to_str(ins)
+}
+
+/// "opcode" as in a partially decoded instruction with a separate
+/// address mode byte
 pub fn opcode_to_str(opcode: u8) -> &'static str {
     match opcode {
         0x00 => { "NOP" },

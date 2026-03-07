@@ -156,6 +156,12 @@ impl NESBoard {
     // Assume PHI 1 and read configuration
     fn cpu_mem_read(&mut self) {
         let addr = self.cpu_pins.address_bus;
+        if addr == 52 {
+            println!("Dummy read from $0050 for {} ({})", nes_rust::cpu::instructions::real_opcode_to_str(self.cpu.opcode), self.cpu.opcode);
+        }
+        if addr == 2002 {
+            println!("Dummy read from $2002 for {} ({})", nes_rust::cpu::instructions::real_opcode_to_str(self.cpu.opcode), self.cpu.opcode);
+        }
         match addr {
             0x0000..0x2000 => {
                 let addr = usize::from(addr) % 0x0800;
@@ -167,7 +173,7 @@ impl NESBoard {
                 self.ppu_pins.cpu_rw = self.cpu_pins.address_rw;
                 self.ppu_pins.cpu_addr = addr as u8;
                 self.ppu_pins.cpu_control = true;
-                // Data bus will be filled via the ppu_block fn
+                // Data bus will be filled via the ppu_clock fn
             }
             0x4000..0x4020 => {
                 // apu and IO
@@ -177,7 +183,7 @@ impl NESBoard {
                     }
                     0x4016..0x4018 => {
                         let controller = (addr & 0b01) as usize;
-                        self.cpu_pins.data_bus = (self.controllers_copy[controller] & 0x80) >> 7;
+                        self.cpu_pins.data_bus = (self.cpu_pins.data_bus & 0b11100000) | (self.controllers_copy[controller] & 0x80) >> 7;
                         self.controllers_copy[controller] <<= 1;
                     }
                     _ => {}
@@ -189,7 +195,7 @@ impl NESBoard {
             0x6000..0x8000 => {
                 // prg ram
                 // old modulus: 0x0800 or 2048
-                if self.prg_ram.len() > 0 {
+                if !self.prg_ram.is_empty() {
                     let addr = usize::from(addr - 0x6000) % self.prg_ram.len();
                     self.cpu_pins.data_bus = self.prg_ram[addr];
                 }
@@ -247,7 +253,7 @@ impl NESBoard {
             0x6000..0x8000 => {
                 // prg ram, if available
                 // old modulus: 0x0800 or 2048
-                if self.prg_ram.len() > 0 {
+                if !self.prg_ram.is_empty() {
                     let addr = usize::from(addr - 0x6000) % self.prg_ram.len();
                     self.prg_ram[addr] = self.cpu_pins.data_bus;
                 }
@@ -303,7 +309,7 @@ impl NESBoard {
 
         // pass buffered data back to the cpu during a cpu read - this should be occuring between phi1 and
         // phi2
-        if self.ppu_pins.cpu_control && self.ppu_pins.cpu_rw {
+        if self.ppu_pins.cpu_control /*&& self.ppu_pins.cpu_rw*/ {
             self.cpu_pins.data_bus = self.ppu_pins.cpu_data;
         }
         // Don't keep the ppu in a state of manipulating registers
