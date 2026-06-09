@@ -396,14 +396,15 @@ impl Apu {
             // does not clear dmc interrupt flag
         }
 
+        //TODO: What was I even doing with this? Was this before I placed the emulator
+        //      on the audio thread?
         self.emulated_time += 1.0 / 1789773.0;
 
-        let mut acc_sample = 0.0;
         // APU Timer clocks every 2 cpu cycles
         // TODO: This even-cycle check was removed and seems to
         // fix the high-pitch whining. I believe I was double-checking even cycles and therefore only
         // generating 1/2 the samples needed.
-        // if self.clock_counter % 2 == 1 {
+        if self.clock_counter % 2 == 1 {
             // self.clock_counter = 0;
             self.frame_counter += 1;
 
@@ -445,12 +446,12 @@ impl Apu {
                     // pull irq on cpu, do not reset until status is written
                 }
             }
-        // }
+            self.square1.clock(self.square1_enable);
+            self.square2.clock(self.square2_enable);
+        }
+        self.clock_counter += 1;
 
-        self.square1.clock(self.square1_enable);
         let p1_sample = self.square1.sample() as f64;
-
-        self.square2.clock(self.square2_enable);
         let p2_sample = self.square2.sample() as f64;
 
         // self.triangle.clock(self.triangle_enable, |_s| {});
@@ -474,11 +475,7 @@ impl Apu {
             159.79 / (1.0 / tnd_under + 100.0)
         };
 
-        acc_sample += pulse_out + tnd_out;
-
-        self.clock_counter += 1;
-
-        acc_sample
+        pulse_out + tnd_out
     }
 }
 
